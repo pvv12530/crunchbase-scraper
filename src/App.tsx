@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Play, Square, Trash2, Upload } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Play,
+  Square,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
 import type { DateRunMeta, ScrapeQueueState } from "@shared/models";
@@ -17,6 +25,40 @@ function todayKey(): string {
 function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
 }
+
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+function dateKeyFromParts(y: number, m: number, d: number): string {
+  return `${y}-${pad2(m)}-${pad2(d)}`;
+}
+
+function parseDateKeyParts(
+  key: string,
+): { y: number; m: number; d: number } | null {
+  if (!isDateKey(key)) return null;
+  const [ys, ms, ds] = key.split("-");
+  const y = Number(ys);
+  const m = Number(ms);
+  const d = Number(ds);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d))
+    return null;
+  return { y, m, d };
+}
+
+function daysInMonth(year: number, month1to12: number): number {
+  return new Date(year, month1to12, 0).getDate();
+}
+
+/** First weekday 0=Sun for the first day of month (month 1–12). */
+function firstWeekdayOfMonth(year: number, month1to12: number): number {
+  return new Date(year, month1to12 - 1, 1).getDay();
+}
+
+type ModeTab = "calendar" | "csv";
 
 const btnBase =
   "rounded-lg border border-[#2a3140] bg-[#1e2430] px-3 py-2 text-xs text-[#e8eaef] cursor-pointer transition-opacity disabled:opacity-[0.45] disabled:cursor-not-allowed";
@@ -182,6 +224,14 @@ export function App(): JSX.Element {
     ok: false,
     text: "Checking active tab…",
   });
+  const [modeTab, setModeTab] = useState<ModeTab>("calendar");
+  const [calendarView, setCalendarView] = useState<{ y: number; m: number }>(
+    () => {
+      const t = new Date();
+      return { y: t.getFullYear(), m: t.getMonth() + 1 };
+    },
+  );
+  const prevModeTab = useRef<ModeTab>(modeTab);
   /** Last successful "Scrape results" snapshot (all paginated rows, all visible columns). */
 
   const [logsByDate, setLogsByDate] = useState<LogsByDate>({});
@@ -285,6 +335,14 @@ export function App(): JSX.Element {
     void loadQueueState();
     void refreshTabContext();
   }, [loadRuns, loadQueueState, refreshTabContext]);
+
+  useEffect(() => {
+    const prev = prevModeTab.current;
+    prevModeTab.current = modeTab;
+    if (modeTab !== "calendar" || prev === "calendar") return;
+    const p = parseDateKeyParts(selectedDateKey);
+    if (p) setCalendarView({ y: p.y, m: p.m });
+  }, [modeTab, selectedDateKey]);
 
   useEffect(() => {
     void (async () => {
@@ -553,6 +611,7 @@ export function App(): JSX.Element {
         const first = dates[0];
         if (first) setSelectedDateKey(first);
       }
+      setModeTab("csv");
       void loadRuns();
       void loadQueueState();
     },
@@ -579,7 +638,6 @@ export function App(): JSX.Element {
     })();
   };
 
-  const meta = runForDate(selectedDateKey);
   const isCb = tabCtx.ok;
   const hasValidSelectedDate = isDateKey(selectedDateKey);
   const scrapeDisabled = !isCb || !hasValidSelectedDate;
@@ -596,18 +654,47 @@ export function App(): JSX.Element {
         : [];
 
   const selectedLogs = logsByDate[selectedDateKey] ?? [];
-  const currentStatusText =
-    queueState?.activeDateKey === selectedDateKey
-      ? (selectedLogs[selectedLogs.length - 1]?.text ?? "Running…")
-      : (meta?.status ?? "idle");
+
+  const calendarYear = calendarView.y;
+  const calendarMonth = calendarView.m;
+  const dim = daysInMonth(calendarYear, calendarMonth);
+  const lead = firstWeekdayOfMonth(calendarYear, calendarMonth);
+  const today = todayKey();
+  const calendarCells: ({ day: number } | null)[] = [];
+  for (let i = 0; i < lead; i++) calendarCells.push(null);
+  for (let d = 1; d <= dim; d++) calendarCells.push({ day: d });
+  while (calendarCells.length % 7 !== 0) calendarCells.push(null);
+  while (calendarCells.length < 42) calendarCells.push(null);
+
+  const monthTitle = new Date(
+    calendarYear,
+    calendarMonth - 1,
+    1,
+  ).toLocaleString(undefined, { month: "long", year: "numeric" });
+
+  const bumpCalendarMonth = (delta: number) => {
+    setCalendarView((cur) => {
+      let m = cur.m + delta;
+      let y = cur.y;
+      while (m > 12) {
+        m -= 12;
+        y += 1;
+      }
+      while (m < 1) {
+        m += 12;
+        y -= 1;
+      }
+      return { y, m };
+    });
+  };
 
   return (
     <div className="min-h-screen bg-[#0f1115] p-3 text-[13px] font-sans leading-snug text-[#e8eaef] antialiased">
       <header className="mb-3">
         <h1 className="mb-1 text-base font-semibold">Crunchbase Date Batch</h1>
         <p className="m-0 text-xs text-[#9aa3b2]">
-          Import a CSV of dates (first column). Scrapes run in order on the
-          active Crunchbase tab.
+          Pick a date on the calendar or import a CSV of dates (first column).
+          Scrapes use the active Crunchbase tab.
         </p>
       </header>
 
@@ -622,172 +709,288 @@ export function App(): JSX.Element {
         </span>
       </section>
 
-      <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
-        <h2 className="mb-2 text-xs font-medium text-[#9aa3b2]">
-          Import dates (CSV)
-        </h2>
-        <div
-          role="button"
-          tabIndex={0}
+      <div
+        className="mb-3 flex rounded-lg border border-[#2a3140] bg-[#12151c] p-0.5"
+        role="tablist"
+        aria-label="Date source"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={modeTab === "calendar"}
           className={[
-            "group relative rounded-xl border-2 border-dashed px-3 py-6 text-center transition-colors outline-none",
-            "focus-visible:ring-2 focus-visible:ring-[#4c8bf5]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
-            csvDragOver
-              ? "border-[#4c8bf5] bg-[#4c8bf5]/10"
-              : "border-[#3a4354] bg-[#12151c] hover:border-[#4c8bf5]/50 hover:bg-[#161a22]",
+            "flex-1 rounded-md px-3 py-2 text-xs font-medium transition-colors",
+            modeTab === "calendar"
+              ? "bg-[#4c8bf5] text-white"
+              : "text-[#9aa3b2] hover:text-[#e8eaef]",
           ].join(" ")}
-          onDragEnter={(e) => {
-            e.preventDefault();
-            csvDragDepth.current += 1;
-            setCsvDragOver(true);
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "copy";
-          }}
-          onDragLeave={(e) => {
-            e.preventDefault();
-            csvDragDepth.current = Math.max(0, csvDragDepth.current - 1);
-            if (csvDragDepth.current === 0) setCsvDragOver(false);
-          }}
-          onDrop={onCsvDropZoneDrop}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              csvInputRef.current?.click();
-            }
-          }}
-          onClick={() => csvInputRef.current?.click()}
+          onClick={() => setModeTab("calendar")}
         >
-          <input
-            ref={csvInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            className="sr-only"
-            aria-label="Choose CSV file"
-            onChange={onCsvInputChange}
-          />
-          <div className="pointer-events-none mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full border border-[#2a3140] bg-[#1e2430] text-[#9aa3b2] group-hover:text-[#e8eaef]">
-            <Upload className="h-5 w-5" strokeWidth={1.75} aria-hidden />
-          </div>
-          <p className="m-0 text-[13px] font-medium text-[#e8eaef]">
-            Drop a CSV here or <span className="text-[#4c8bf5]">browse</span>
-          </p>
-        </div>
-        {csvHint ? (
-          <p
-            className={`mt-2 mb-0 text-[11px] ${
-              csvHint.startsWith("Imported")
-                ? "text-[#8bd49a]"
-                : "text-[#f0a96e]"
-            }`}
-          >
-            {csvHint}
-          </p>
-        ) : null}
-      </section>
+          Calendar
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={modeTab === "csv"}
+          className={[
+            "flex-1 rounded-md px-3 py-2 text-xs font-medium transition-colors",
+            modeTab === "csv"
+              ? "bg-[#4c8bf5] text-white"
+              : "text-[#9aa3b2] hover:text-[#e8eaef]",
+          ].join(" ")}
+          onClick={() => setModeTab("csv")}
+        >
+          CSV
+        </button>
+      </div>
 
-      {dateRows.length > 0 ? (
-        <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="m-0 text-xs font-medium text-[#9aa3b2]">
-              Batch queue
+      {modeTab === "calendar" ? (
+        <section
+          className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5"
+          aria-label="Calendar"
+        >
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              className={`${btnBase} px-2 py-2`}
+              onClick={() => bumpCalendarMonth(-1)}
+              aria-label="Previous month"
+            >
+              <ChevronLeft className="h-4 w-4" aria-hidden />
+            </button>
+            <h2 className="m-0 min-w-0 flex-1 text-center text-sm font-medium text-[#e8eaef]">
+              {monthTitle}
             </h2>
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                type="button"
-                className={`${btnBase} flex items-center gap-1`}
-                disabled={!hasActiveJob}
-                onClick={() => void onStop()}
-                title="Stop the current date only; remaining dates stay queued"
-              >
-                <Square className="h-3.5 w-3.5" aria-hidden />
-                Stop
-              </button>
-              <button
-                type="button"
-                className={btnBase}
-                disabled={!queueBusy}
-                onClick={() => void onClearQueue()}
-                title="Remove pending dates and stop the active scrape"
-              >
-                Clear queue
-              </button>
-            </div>
+            <button
+              type="button"
+              className={`${btnBase} px-2 py-2`}
+              onClick={() => bumpCalendarMonth(1)}
+              aria-label="Next month"
+            >
+              <ChevronRight className="h-4 w-4" aria-hidden />
+            </button>
           </div>
-          <ul className="m-0 max-h-[min(220px,40vh)] list-none space-y-1 overflow-y-auto p-0">
-            {dateRows.map((dk) => {
-              const rowMeta = runForDate(dk);
-              const label = labelForRow(dk, rowMeta, queueState);
-              const sel = selectedDateKey === dk;
+          <div className="grid grid-cols-7 gap-0.5 text-center text-[10px] font-medium uppercase tracking-wide text-[#9aa3b2]">
+            {WEEKDAY_LABELS.map((w) => (
+              <div key={w} className="py-1">
+                {w}
+              </div>
+            ))}
+          </div>
+          <div className="mt-0.5 grid grid-cols-7 gap-0.5">
+            {calendarCells.map((cell, idx) => {
+              if (!cell) {
+                return (
+                  <div
+                    key={`pad-${idx}`}
+                    className="aspect-square min-h-8"
+                  />
+                );
+              }
+              const dk = dateKeyFromParts(
+                calendarYear,
+                calendarMonth,
+                cell.day,
+              );
+              const isSel = hasValidSelectedDate && selectedDateKey === dk;
+              const isTodayCell = today === dk;
               return (
-                <li
+                <button
                   key={dk}
+                  type="button"
                   className={[
-                    "flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs",
-                    sel
-                      ? "border-[#4c8bf5] bg-[#4c8bf5]/10"
-                      : "border-[#2a3140] bg-[#12151c]",
+                    "flex aspect-square min-h-8 items-center justify-center rounded-lg border text-xs font-medium transition-colors",
+                    isSel
+                      ? "border-[#4c8bf5] bg-[#4c8bf5]/20 text-[#e8eaef]"
+                      : "border-transparent bg-[#12151c] text-[#e8eaef] hover:border-[#3a4354] hover:bg-[#1e2430]",
+                    isTodayCell && !isSel ? "ring-1 ring-[#6ea8ff]/50" : "",
                   ].join(" ")}
+                  onClick={() => {
+                    setSelectedDateKey(dk);
+                  }}
                 >
-                  <button
-                    type="button"
-                    className="min-w-0 flex-1 truncate text-left text-[#e8eaef]"
-                    onClick={() => setSelectedDateKey(dk)}
-                  >
-                    {dk}
-                    <span className="ml-2 text-[#9aa3b2]">— {label}</span>
-                    {rowMeta?.errorMessage ? (
-                      <span className="ml-1 text-[#f0a96e]">
-                        ({rowMeta.errorMessage.slice(0, 80)}
-                        {(rowMeta.errorMessage.length ?? 0) > 80 ? "…" : ""})
-                      </span>
-                    ) : null}
-                  </button>
-                  <button
-                    type="button"
-                    className={`${btnBase} shrink-0 py-1`}
-                    disabled={
-                      !isCb || label === "running" || label === "queued"
-                    }
-                    onClick={() => void onRetryRow(dk)}
-                  >
-                    Retry
-                  </button>
-                </li>
+                  {cell.day}
+                </button>
               );
             })}
-          </ul>
-        </section>
-      ) : null}
-
-      <section id="detailPanel">
-        <h2 id="detailTitle" className="mb-2 text-sm font-medium">
-          Date {selectedDateKey || "—"}
-        </h2>
-        <div className="mb-2 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="date"
-              className="rounded-lg border border-[#2a3140] bg-[#12151c] px-2.5 py-2 text-xs text-[#e8eaef] outline-none focus:ring-2 focus:ring-[#4c8bf5]/60"
-              value={selectedDateKey || todayKey()}
-              onChange={(e) => setSelectedDateKey(e.target.value)}
-            />
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#2a3140] pt-3">
+            <p className="m-0 text-xs text-[#9aa3b2]">
+              Selected:{" "}
+              <span className="font-medium text-[#e8eaef]">
+                {hasValidSelectedDate ? selectedDateKey : "—"}
+              </span>
+            </p>
             <button
               type="button"
               className={btnBase}
-              onClick={() => setSelectedDateKey(todayKey())}
-              title="Set to today"
+              onClick={() => {
+                const t = todayKey();
+                setSelectedDateKey(t);
+                const p = parseDateKeyParts(t);
+                if (p) setCalendarView({ y: p.y, m: p.m });
+              }}
+              title="Jump to today"
             >
               Today
             </button>
           </div>
-          {!hasValidSelectedDate ? (
-            <p className="mt-1 mb-0 text-[11px] text-[#f0a96e]">
-              Select a date to enable scraping.
-            </p>
-          ) : null}
-        </div>
+        </section>
+      ) : (
+        <>
+          <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
+            <h2 className="mb-2 text-xs font-medium text-[#9aa3b2]">
+              Import dates (CSV)
+            </h2>
+            <div
+              role="button"
+              tabIndex={0}
+              className={[
+                "group relative rounded-xl border-2 border-dashed px-3 py-6 text-center transition-colors outline-none",
+                "focus-visible:ring-2 focus-visible:ring-[#4c8bf5]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
+                csvDragOver
+                  ? "border-[#4c8bf5] bg-[#4c8bf5]/10"
+                  : "border-[#3a4354] bg-[#12151c] hover:border-[#4c8bf5]/50 hover:bg-[#161a22]",
+              ].join(" ")}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                csvDragDepth.current += 1;
+                setCsvDragOver(true);
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                csvDragDepth.current = Math.max(0, csvDragDepth.current - 1);
+                if (csvDragDepth.current === 0) setCsvDragOver(false);
+              }}
+              onDrop={onCsvDropZoneDrop}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  csvInputRef.current?.click();
+                }
+              }}
+              onClick={() => csvInputRef.current?.click()}
+            >
+              <input
+                ref={csvInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                className="sr-only"
+                aria-label="Choose CSV file"
+                onChange={onCsvInputChange}
+              />
+              <div className="pointer-events-none mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full border border-[#2a3140] bg-[#1e2430] text-[#9aa3b2] group-hover:text-[#e8eaef]">
+                <Upload className="h-5 w-5" strokeWidth={1.75} aria-hidden />
+              </div>
+              <p className="m-0 text-[13px] font-medium text-[#e8eaef]">
+                Drop a CSV here or{" "}
+                <span className="text-[#4c8bf5]">browse</span>
+              </p>
+            </div>
+            {csvHint ? (
+              <p
+                className={`mt-2 mb-0 text-[11px] ${
+                  csvHint.startsWith("Imported")
+                    ? "text-[#8bd49a]"
+                    : "text-[#f0a96e]"
+                }`}
+              >
+                {csvHint}
+              </p>
+            ) : null}
+          </section>
+
+          <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <h2 className="m-0 text-xs font-medium text-[#9aa3b2]">
+                Dates from CSV
+              </h2>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  className={`${btnBase} flex items-center gap-1`}
+                  disabled={!hasActiveJob}
+                  onClick={() => void onStop()}
+                  title="Stop the current date only; remaining dates stay queued"
+                >
+                  <Square className="h-3.5 w-3.5" aria-hidden />
+                  Stop
+                </button>
+                <button
+                  type="button"
+                  className={btnBase}
+                  disabled={!queueBusy}
+                  onClick={() => void onClearQueue()}
+                  title="Remove pending dates and stop the active scrape"
+                >
+                  Clear queue
+                </button>
+              </div>
+            </div>
+            {dateRows.length === 0 ? (
+              <p className="m-0 rounded-md border border-dashed border-[#2a3140] bg-[#12151c]/80 px-3 py-6 text-center text-[12px] text-[#9aa3b2]">
+                Upload a CSV to list dates and their scrape status.
+              </p>
+            ) : (
+              <ul className="m-0 max-h-[min(220px,40vh)] list-none space-y-1 overflow-y-auto p-0">
+                {dateRows.map((dk) => {
+                  const rowMeta = runForDate(dk);
+                  const label = labelForRow(dk, rowMeta, queueState);
+                  const sel = selectedDateKey === dk;
+                  return (
+                    <li
+                      key={dk}
+                      className={[
+                        "flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs",
+                        sel
+                          ? "border-[#4c8bf5] bg-[#4c8bf5]/10"
+                          : "border-[#2a3140] bg-[#12151c]",
+                      ].join(" ")}
+                    >
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate text-left text-[#e8eaef]"
+                        onClick={() => setSelectedDateKey(dk)}
+                      >
+                        {dk}
+                        <span className="ml-2 text-[#9aa3b2]">— {label}</span>
+                        {rowMeta?.errorMessage ? (
+                          <span className="ml-1 text-[#f0a96e]">
+                            ({rowMeta.errorMessage.slice(0, 80)}
+                            {(rowMeta.errorMessage.length ?? 0) > 80
+                              ? "…"
+                              : ""}
+                            )
+                          </span>
+                        ) : null}
+                      </button>
+                      <button
+                        type="button"
+                        className={`${btnBase} shrink-0 py-1`}
+                        disabled={
+                          !isCb || label === "running" || label === "queued"
+                        }
+                        onClick={() => void onRetryRow(dk)}
+                      >
+                        Retry
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        </>
+      )}
+
+      <section id="detailPanel">
+        <h2 id="detailTitle" className="mb-2 text-sm font-medium">
+          Actions for {selectedDateKey || "—"}
+        </h2>
         <div className="mb-2 flex flex-wrap gap-2">
           <button
             type="button"
@@ -826,7 +1029,7 @@ export function App(): JSX.Element {
           {!isCb
             ? "Switch to a Crunchbase tab to enable scraping."
             : !hasValidSelectedDate
-              ? "Pick a date above to enable scraping."
+              ? "Choose a date on the Calendar tab or select a row from your CSV list."
               : "Uses filters already visible on the page; set your date column filter on Crunchbase if needed."}
         </p>
 
@@ -882,7 +1085,7 @@ export function App(): JSX.Element {
         </h3>
         <p className="mb-2 m-0 text-[11px] text-[#9aa3b2]">
           {!hasValidSelectedDate
-            ? "Pick a date above to load files."
+            ? "Select a date on the calendar or from the CSV list to load files."
             : remoteJsonLoading
               ? "Loading…"
               : remoteJsonError
