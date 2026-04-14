@@ -187,6 +187,8 @@ export function App(): JSX.Element {
   const [logsByDate, setLogsByDate] = useState<LogsByDate>({});
   const logsHydratedOnce = useRef(false);
   const saveLogsTimer = useRef<number | null>(null);
+  /** When set, `scrape/complete` for this dateKey triggers "Scrape results" automatically. */
+  const pendingAutoScrapeResultsDateKey = useRef<string | null>(null);
   const [remoteJsonFiles, setRemoteJsonFiles] = useState<SupabaseJsonFile[]>(
     [],
   );
@@ -309,6 +311,107 @@ export function App(): JSX.Element {
     };
   }, [logsByDate]);
 
+  const runScrapeResults = useCallback(
+    async (opts?: { runKey?: string; fromAutoChain?: boolean }) => {
+      const runKey =
+        opts?.runKey && isDateKey(opts.runKey)
+          ? opts.runKey
+          : isDateKey(selectedDateKey)
+            ? selectedDateKey
+            : todayKey();
+      const downloadKey = todayKey();
+      if (!isDateKey(selectedDateKey)) setSelectedDateKey(runKey);
+      const startLog = opts?.fromAutoChain
+        ? 'Starting "Scrape results" after date scrape finished'
+        : 'Clicked "Scrape results" (no JSON files)';
+      setLogsByDate((prev) => {
+        const cur = prev[runKey] ?? [];
+        const next = [
+          ...cur,
+          {
+            at: new Date().toISOString(),
+            level: "info" as const,
+            text: startLog,
+          },
+        ].slice(-LOGS_MAX_PER_DATE);
+        return { ...prev, [runKey]: next };
+      });
+      const res = (await chrome.runtime.sendMessage({
+        type: "scrape/resultsStart",
+        runKey,
+      } satisfies ExtensionMessage)) as {
+        ok?: boolean;
+        error?: string;
+        totalRows?: number;
+        columns?: string[];
+        rows?: Record<string, unknown>[];
+      };
+      if (res && typeof res === "object" && res.ok === false && res.error) {
+        setLogsByDate((prev) => {
+          const cur = prev[runKey] ?? [];
+          const next = [
+            ...cur,
+            {
+              at: new Date().toISOString(),
+              level: "error" as const,
+              text: res.error ?? "Scrape results failed",
+            },
+          ].slice(-LOGS_MAX_PER_DATE);
+          return { ...prev, [runKey]: next };
+        });
+        return;
+      }
+      const columns = Array.isArray(res?.columns) ? res.columns : [];
+      const rows = Array.isArray(res?.rows) ? res.rows : [];
+      const totalRows =
+        typeof res?.totalRows === "number" ? res.totalRows : rows.length;
+      const snapshot = { runKey, columns, rows, totalRows };
+      void queueMicrotask(() =>
+        downloadScrapeResultsJsonFile({ ...snapshot, runKey: downloadKey }),
+      );
+      void queueMicrotask(async () => {
+        try {
+          const body = { entities: rows, count: totalRows };
+          const jsonText = JSON.stringify(body, null, 2);
+          const filename = `crunchbase-scrape-results-${downloadKey}.json`;
+          await uploadJsonToSupabase({
+            date: runKey,
+            filename,
+            jsonText,
+          });
+          const files = await fetchJsonFilesByDate(runKey);
+          setRemoteJsonFiles(files);
+        } catch (e) {
+          setLogsByDate((prev) => {
+            const cur = prev[runKey] ?? [];
+            const next = [
+              ...cur,
+              {
+                at: new Date().toISOString(),
+                level: "warn" as const,
+                text: `Upload failed: ${e instanceof Error ? e.message : String(e)}`,
+              },
+            ].slice(-LOGS_MAX_PER_DATE);
+            return { ...prev, [runKey]: next };
+          });
+        }
+      });
+      setLogsByDate((prev) => {
+        const cur = prev[runKey] ?? [];
+        const next = [
+          ...cur,
+          {
+            at: new Date().toISOString(),
+            level: "info" as const,
+            text: `Saved JSON download: crunchbase-scrape-results-${downloadKey}.json`,
+          },
+        ].slice(-LOGS_MAX_PER_DATE);
+        return { ...prev, [runKey]: next };
+      });
+    },
+    [selectedDateKey],
+  );
+
   useEffect(() => {
     const onMsg = (msg: ExtensionMessage) => {
       if (msg.type === "tabContext/changed") {
@@ -322,6 +425,18 @@ export function App(): JSX.Element {
       ) {
         void loadRuns();
         void loadQueueState();
+      }
+      if (msg.type === "scrape/error") {
+        if (pendingAutoScrapeResultsDateKey.current === msg.dateKey) {
+          pendingAutoScrapeResultsDateKey.current = null;
+        }
+      }
+      if (msg.type === "scrape/complete") {
+        const pending = pendingAutoScrapeResultsDateKey.current;
+        if (pending != null && pending === msg.dateKey) {
+          pendingAutoScrapeResultsDateKey.current = null;
+          void runScrapeResults({ runKey: msg.dateKey, fromAutoChain: true });
+        }
       }
       if (msg.type === "scrape/log") {
         setLogsByDate((prev) => {
@@ -337,7 +452,7 @@ export function App(): JSX.Element {
     };
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
-  }, [loadRuns, loadQueueState, refreshTabContext]);
+  }, [loadRuns, loadQueueState, refreshTabContext, runScrapeResults]);
 
   useEffect(() => {
     if (!isDateKey(selectedDateKey)) {
@@ -362,6 +477,9 @@ export function App(): JSX.Element {
   }, [selectedDateKey]);
 
   const onScrape = async () => {
+    if (isDateKey(selectedDateKey)) {
+      pendingAutoScrapeResultsDateKey.current = selectedDateKey;
+    }
     setLogsByDate((prev) => {
       const cur = prev[selectedDateKey] ?? [];
       const next = [
@@ -383,97 +501,15 @@ export function App(): JSX.Element {
   };
 
   const onScrapeResults = async () => {
-    // Keep UI context stable by keying this run/logs to the currently selected date.
-    // Use a standalone key only for the download filename.
-    const runKey = selectedDateKey || todayKey();
-    const downloadKey = todayKey();
-    // If the user hasn't selected a date yet, set it now so the UI doesn't look "empty"
-    // while logs/results are being recorded under `runKey`.
-    if (!isDateKey(selectedDateKey)) setSelectedDateKey(runKey);
+    await runScrapeResults();
+  };
+
+  const onClearLogHistory = () => {
+    if (!isDateKey(selectedDateKey)) return;
     setLogsByDate((prev) => {
-      const cur = prev[runKey] ?? [];
-      const next = [
-        ...cur,
-        {
-          at: new Date().toISOString(),
-          level: "info" as const,
-          text: 'Clicked "Scrape results" (no JSON files)',
-        },
-      ].slice(-LOGS_MAX_PER_DATE);
-      return { ...prev, [runKey]: next };
-    });
-    const res = (await chrome.runtime.sendMessage({
-      type: "scrape/resultsStart",
-      runKey,
-    } satisfies ExtensionMessage)) as {
-      ok?: boolean;
-      error?: string;
-      totalRows?: number;
-      columns?: string[];
-      rows?: Record<string, unknown>[];
-    };
-    if (res && typeof res === "object" && res.ok === false && res.error) {
-      setLogsByDate((prev) => {
-        const cur = prev[runKey] ?? [];
-        const next = [
-          ...cur,
-          {
-            at: new Date().toISOString(),
-            level: "error" as const,
-            text: res.error ?? "Scrape results failed",
-          },
-        ].slice(-LOGS_MAX_PER_DATE);
-        return { ...prev, [runKey]: next };
-      });
-      return;
-    }
-    const columns = Array.isArray(res?.columns) ? res.columns : [];
-    const rows = Array.isArray(res?.rows) ? res.rows : [];
-    const totalRows =
-      typeof res?.totalRows === "number" ? res.totalRows : rows.length;
-    const snapshot = { runKey, columns, rows, totalRows };
-    void queueMicrotask(() =>
-      downloadScrapeResultsJsonFile({ ...snapshot, runKey: downloadKey }),
-    );
-    void queueMicrotask(async () => {
-      try {
-        const body = { entities: rows, count: totalRows };
-        const jsonText = JSON.stringify(body, null, 2);
-        const filename = `crunchbase-scrape-results-${downloadKey}.json`;
-        await uploadJsonToSupabase({
-          date: runKey,
-          filename,
-          jsonText,
-        });
-        // Refresh the per-date list so the newly uploaded file appears immediately.
-        const files = await fetchJsonFilesByDate(runKey);
-        setRemoteJsonFiles(files);
-      } catch (e) {
-        setLogsByDate((prev) => {
-          const cur = prev[runKey] ?? [];
-          const next = [
-            ...cur,
-            {
-              at: new Date().toISOString(),
-              level: "warn" as const,
-              text: `Upload failed: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ].slice(-LOGS_MAX_PER_DATE);
-          return { ...prev, [runKey]: next };
-        });
-      }
-    });
-    setLogsByDate((prev) => {
-      const cur = prev[runKey] ?? [];
-      const next = [
-        ...cur,
-        {
-          at: new Date().toISOString(),
-          level: "info" as const,
-          text: `Saved JSON download: crunchbase-scrape-results-${downloadKey}.json`,
-        },
-      ].slice(-LOGS_MAX_PER_DATE);
-      return { ...prev, [runKey]: next };
+      const next = { ...prev };
+      delete next[selectedDateKey];
+      return next;
     });
   };
 
@@ -793,6 +829,53 @@ export function App(): JSX.Element {
               ? "Pick a date above to enable scraping."
               : "Uses filters already visible on the page; set your date column filter on Crunchbase if needed."}
         </p>
+
+        <div className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="m-0 text-xs font-medium text-[#9aa3b2]">
+              Log history ({selectedDateKey || "—"})
+            </h3>
+            <button
+              type="button"
+              className={btnBase}
+              disabled={!hasValidSelectedDate || selectedLogs.length === 0}
+              onClick={onClearLogHistory}
+            >
+              Clear
+            </button>
+          </div>
+          {!hasValidSelectedDate ? (
+            <p className="m-0 text-[11px] text-[#9aa3b2]">
+              Select a date to view logs for that run.
+            </p>
+          ) : selectedLogs.length === 0 ? (
+            <p className="m-0 text-[11px] text-[#9aa3b2]">
+              No log lines yet for this date.
+            </p>
+          ) : (
+            <ul className="m-0 max-h-[min(200px,35vh)] list-none space-y-1 overflow-y-auto p-0 font-mono text-[11px] leading-relaxed">
+              {selectedLogs.map((line, i) => {
+                const color =
+                  line.level === "error"
+                    ? "text-[#f0a96e]"
+                    : line.level === "warn"
+                      ? "text-[#e8c170]"
+                      : "text-[#b8c0cc]";
+                return (
+                  <li
+                    key={`${line.at}-${i}`}
+                    className={`wrap-break-word border-b border-[#2a3140]/60 pb-1 last:border-b-0 ${color}`}
+                  >
+                    <span className="text-[#5c6570]">
+                      {new Date(line.at).toLocaleTimeString()}{" "}
+                    </span>
+                    {line.text}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
 
         <h3 className="mb-1.5 mt-3 text-xs font-medium text-[#9aa3b2]">
           JSON files for this date (cloud)
