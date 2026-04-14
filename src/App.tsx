@@ -214,6 +214,8 @@ function labelForRow(
 export function App(): JSX.Element {
   const [runs, setRuns] = useState<DateRunMeta[]>([]);
   const [selectedDateKey, setSelectedDateKey] = useState<string>("");
+  const selectedDateKeyRef = useRef(selectedDateKey);
+  selectedDateKeyRef.current = selectedDateKey;
   const [importedDateOrder, setImportedDateOrder] = useState<string[]>([]);
   const [queueState, setQueueState] = useState<ScrapeQueueState | null>(null);
   const [csvHint, setCsvHint] = useState("");
@@ -237,8 +239,6 @@ export function App(): JSX.Element {
   const [logsByDate, setLogsByDate] = useState<LogsByDate>({});
   const logsHydratedOnce = useRef(false);
   const saveLogsTimer = useRef<number | null>(null);
-  /** When set, `scrape/complete` for this dateKey triggers "Scrape results" automatically. */
-  const pendingAutoScrapeResultsDateKey = useRef<string | null>(null);
   const [remoteJsonFiles, setRemoteJsonFiles] = useState<SupabaseJsonFile[]>(
     [],
   );
@@ -370,7 +370,7 @@ export function App(): JSX.Element {
   }, [logsByDate]);
 
   const runScrapeResults = useCallback(
-    async (opts?: { runKey?: string; fromAutoChain?: boolean }) => {
+    async (opts?: { runKey?: string }) => {
       const runKey =
         opts?.runKey && isDateKey(opts.runKey)
           ? opts.runKey
@@ -379,9 +379,7 @@ export function App(): JSX.Element {
             : todayKey();
       const downloadKey = todayKey();
       if (!isDateKey(selectedDateKey)) setSelectedDateKey(runKey);
-      const startLog = opts?.fromAutoChain
-        ? 'Starting "Scrape results" after date scrape finished'
-        : 'Clicked "Scrape results" (no JSON files)';
+      const startLog = 'Clicked "Scrape results"';
       setLogsByDate((prev) => {
         const cur = prev[runKey] ?? [];
         const next = [
@@ -484,18 +482,6 @@ export function App(): JSX.Element {
         void loadRuns();
         void loadQueueState();
       }
-      if (msg.type === "scrape/error") {
-        if (pendingAutoScrapeResultsDateKey.current === msg.dateKey) {
-          pendingAutoScrapeResultsDateKey.current = null;
-        }
-      }
-      if (msg.type === "scrape/complete") {
-        const pending = pendingAutoScrapeResultsDateKey.current;
-        if (pending != null && pending === msg.dateKey) {
-          pendingAutoScrapeResultsDateKey.current = null;
-          void runScrapeResults({ runKey: msg.dateKey, fromAutoChain: true });
-        }
-      }
       if (msg.type === "scrape/log") {
         setLogsByDate((prev) => {
           const cur = prev[msg.dateKey] ?? [];
@@ -507,10 +493,27 @@ export function App(): JSX.Element {
         });
         setSelectedDateKey((cur) => cur || msg.dateKey);
       }
+      if (msg.type === "scrape/jsonArtifactsUpdated") {
+        const dk = msg.dateKey;
+        if (!isDateKey(dk) || dk !== selectedDateKeyRef.current) return;
+        setRemoteJsonLoading(true);
+        setRemoteJsonError("");
+        void (async () => {
+          try {
+            const files = await fetchJsonFilesByDate(dk);
+            setRemoteJsonFiles(files);
+          } catch (e) {
+            setRemoteJsonFiles([]);
+            setRemoteJsonError(e instanceof Error ? e.message : String(e));
+          } finally {
+            setRemoteJsonLoading(false);
+          }
+        })();
+      }
     };
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
-  }, [loadRuns, loadQueueState, refreshTabContext, runScrapeResults]);
+  }, [loadRuns, loadQueueState, refreshTabContext]);
 
   useEffect(() => {
     if (!isDateKey(selectedDateKey)) {
@@ -535,9 +538,6 @@ export function App(): JSX.Element {
   }, [selectedDateKey]);
 
   const onScrape = async () => {
-    if (isDateKey(selectedDateKey)) {
-      pendingAutoScrapeResultsDateKey.current = selectedDateKey;
-    }
     setLogsByDate((prev) => {
       const cur = prev[selectedDateKey] ?? [];
       const next = [

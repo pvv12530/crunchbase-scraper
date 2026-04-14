@@ -1,6 +1,7 @@
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from '@shared/constants';
 import type { ExtensionMessage } from '@shared/messages';
 import * as storage from '../../storage';
+import { exportMergedJsonFromDateChunks } from './dateScrapeExport';
 import { onScrapeFinished } from './scrapeQueue';
 
 export async function handleContentDone(dateKey: string, totalRows: number): Promise<void> {
@@ -18,6 +19,7 @@ export async function handleContentDone(dateKey: string, totalRows: number): Pro
       .catch(() => {});
   }
   await onScrapeFinished(dateKey);
+  void exportMergedJsonFromDateChunks(dateKey).catch(() => {});
 }
 
 export async function handleContentError(dateKey: string, message: string, partial: boolean): Promise<void> {

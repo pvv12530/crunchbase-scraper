@@ -28,6 +28,15 @@ const SELECTORS = {
     'a[aria-label="Next"]',
     '[data-testid="next-page"]',
   ],
+  prevPage: [
+    "a.page-button-prev[aria-label='Previous']",
+    "button.page-button-prev[aria-label='Previous']",
+    'button[aria-label="Previous"]',
+    'a[aria-label="Previous"]',
+    'button[aria-label="Prev"]',
+    'a[aria-label="Prev"]',
+    '[data-testid="prev-page"]',
+  ],
   resultsRoot: [
     ".search-results",
     "search-results-header",
@@ -640,6 +649,70 @@ function findNextButton(): HTMLElement | null {
   return null;
 }
 
+function findPrevButton(): HTMLElement | null {
+  for (const sel of SELECTORS.prevPage) {
+    const el = document.querySelector(sel);
+    if (el instanceof HTMLElement) return el;
+  }
+  return null;
+}
+
+/**
+ * If the grid is paginated and the user left the tab on a later page, scrape would
+ * only capture from that page forward. Rewind with Previous (same cadence as Next)
+ * until the first page, then the main loop walks Next through all pages.
+ */
+async function rewindResultsToFirstPage(
+  log: (t: string) => void | Promise<void>,
+  signal: AbortSignal | undefined,
+  maxSteps: number,
+): Promise<void> {
+  const prev = findPrevButton();
+  const next = findNextButton();
+  if (!prev && !next) {
+    await log("No pagination controls — single page or custom UI.");
+    return;
+  }
+  if (!prev) {
+    await log("No Previous control found — starting from current page.");
+    return;
+  }
+  if (isNextControlDisabled(prev)) {
+    await log("Previous is disabled — already on first page.");
+    return;
+  }
+
+  await log(
+    "Pagination: Previous is active — clicking back to first page before scraping…",
+  );
+
+  for (let step = 0; step < maxSteps; step++) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+
+    const p = findPrevButton();
+    if (!p || isNextControlDisabled(p)) {
+      await log("Reached first page (Previous disabled).");
+      return;
+    }
+
+    await log(`Waiting ${DELAYS.beforeNextClickMs / 1000}s before clicking Previous…`);
+    await sleep(DELAYS.beforeNextClickMs);
+    p.click();
+    await log('Clicked "Previous"');
+    await sleep(DELAYS.afterNextClickMs);
+    await log("Waiting for previous page results…");
+    await sleep(DELAYS.afterApplyFiltersWaitMs);
+  }
+
+  await log(
+    `Stopped rewinding after ${maxSteps} Previous clicks — verify you are on page 1.`,
+  );
+}
+
 function findResultsGridRoot(): Element | null {
   return (
     document.querySelector(".results-grid") ??
@@ -1242,6 +1315,8 @@ export async function runDiscoverScrape(
   let totalRows = 0;
   const maxPages = 500;
 
+  await rewindResultsToFirstPage(log, signal, maxPages);
+
   // Scrape from DOM (no network JSON capture).
   for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
     if (signal?.aborted) {
@@ -1360,6 +1435,8 @@ export async function runDiscoverScrapeCurrentResults(
 
   await log("Waiting 10s for results to load…");
   await sleep(DELAYS.afterDatesResultsLoadMs);
+
+  await rewindResultsToFirstPage(log, signal, maxPages);
 
   for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
     if (signal?.aborted) {

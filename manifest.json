@@ -3,7 +3,7 @@
   "name": "Crunchbase Date Batch",
   "version": "0.1.0",
   "description": "Scrape Crunchbase Discover by date with side panel calendar and JSON exports.",
-  "permissions": ["storage", "tabs", "scripting", "sidePanel"],
+  "permissions": ["storage", "tabs", "scripting", "sidePanel", "downloads"],
   "host_permissions": [
     "https://www.crunchbase.com/*",
     "https://gfxknuxbtkhomfodrrfr.supabase.co/*"

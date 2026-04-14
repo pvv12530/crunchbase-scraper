@@ -20,6 +20,8 @@ export type ExtensionMessage =
   | { type: 'scrape/progress'; dateKey: string; pageIndex: number; chunkId: string; rowCount?: number }
   | { type: 'scrape/log'; dateKey: string; level: 'info' | 'warn' | 'error'; text: string; at: string }
   | { type: 'scrape/complete'; dateKey: string; meta: DateRunMeta }
+  /** Background finished merged JSON download + optional Supabase upload after a date scrape. */
+  | { type: 'scrape/jsonArtifactsUpdated'; dateKey: string }
   | { type: 'scrape/error'; dateKey: string; message: string; partial: boolean }
   | { type: 'content/chunk'; tabId: number; record: ChunkRecord }
   | { type: 'content/done'; tabId: number; dateKey: string; totalRows: number }
