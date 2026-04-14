@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Crunchbase Date Batch",
+  "version": "0.1.0",
+  "description": "Scrape Crunchbase Discover by date with side panel calendar and JSON exports.",
+  "permissions": ["storage", "tabs", "scripting", "sidePanel"],
+  "host_permissions": [
+    "https://www.crunchbase.com/*",
+    "https://gfxknuxbtkhomfodrrfr.supabase.co/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Crunchbase Date Batch"
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.crunchbase.com/*"],
+      "js": ["content/crunchbase.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

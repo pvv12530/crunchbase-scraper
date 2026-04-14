@@ -1,0 +1,1457 @@
+import type { ChunkRecord } from "@shared/models";
+
+const SOURCE_CRUNCHBASE_DISCOVER_ORGS = "crunchbase-discover-orgs" as const;
+const DISCOVER_ORGS_PATH = "/discover/organization.companies";
+
+const DELAYS = {
+  afterFinancialsClickMs: 650,
+  afterCustomClickMs: 450,
+  afterSetDatesMs: 650,
+  afterDatesResultsLoadMs: 10_000,
+  afterSettingsClickMs: 250,
+  afterMenuOpenMs: 250,
+  afterToggleColumnMs: 200,
+  afterApplyViewMs: 1000,
+  afterApplyFiltersWaitMs: 20_000,
+  initialResultsSettleMs: 2200,
+  betweenPagesSettleMs: 2200,
+  beforeNextClickMs: 60_000, // IMPORTANT: wait 1 min before clicking Next
+  afterNextClickMs: 1600,
+};
+
+const SELECTORS = {
+  /** Prefer Material pagination control (often `<a>` when disabled, not `<button>`). */
+  nextPage: [
+    "a.page-button-next[aria-label='Next']",
+    "button.page-button-next[aria-label='Next']",
+    'button[aria-label="Next"]',
+    'a[aria-label="Next"]',
+    '[data-testid="next-page"]',
+  ],
+  resultsRoot: [
+    ".search-results",
+    "search-results-header",
+    ".results-grid",
+    "sheet-grid",
+  ],
+  noResults: [".no-results-content", "no-content .no-results-content"],
+
+  // Results header settings → "Edit table view" flow
+  resultsHeaderSettingsButton: [
+    'search-results-header button[aria-label="Settings"]',
+    'search-results-header button[mattooltip="Settings"]',
+    'button[aria-label="Settings"]',
+    'button[mattooltip="Settings"]',
+  ],
+  menuPanel: [
+    ".cdk-overlay-container .mat-mdc-menu-panel",
+    ".mat-mdc-menu-panel",
+  ],
+  editViewDialog: ["mat-dialog-container", ".mat-mdc-dialog-container"],
+  editViewFilterInput: [
+    'mat-dialog-container input[placeholder="Find a filter..."]',
+    'mat-dialog-container input[placeholder*="Find a filter"]',
+    'mat-dialog-container input[type="text"][name="filter-finder-no-autocomplete"]',
+  ],
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function normalizeText(s: string): string {
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function getScrollParent(el: Element | null): HTMLElement | null {
+  let cur: Element | null = el;
+  for (let i = 0; i < 12 && cur; i++) {
+    if (cur instanceof HTMLElement) {
+      const style = window.getComputedStyle(cur);
+      const overflowY = style.overflowY;
+      const canScroll =
+        (overflowY === "auto" || overflowY === "scroll") &&
+        cur.scrollHeight > cur.clientHeight + 4;
+      if (canScroll) return cur;
+    }
+    cur = cur.parentElement;
+  }
+  return null;
+}
+
+function getByTagName<T extends Element>(root: ParentNode, tag: string): T[] {
+  return Array.from(root.querySelectorAll(tag)) as T[];
+}
+
+function isElementDisplayed(el: Element | null): el is HTMLElement {
+  if (!(el instanceof HTMLElement)) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === "none") return false;
+  if (style.visibility === "hidden") return false;
+  if (style.opacity === "0") return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+function findOpenMenuPanel(): HTMLElement | null {
+  const selector = SELECTORS.menuPanel.join(",");
+  const candidates = Array.from(document.querySelectorAll(selector));
+  for (const c of candidates) {
+    if (isElementDisplayed(c)) return c;
+  }
+  return null;
+}
+
+async function waitForElement(
+  selector: string,
+  opts: {
+    timeoutMs: number;
+    pollMs?: number;
+    root?: ParentNode;
+    signal?: AbortSignal;
+  },
+): Promise<Element> {
+  const pollMs = opts.pollMs ?? 120;
+  const root = opts.root ?? document;
+  const started = Date.now();
+  while (Date.now() - started < opts.timeoutMs) {
+    if (opts.signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+    const el = root.querySelector(selector);
+    if (el) return el;
+    await sleep(pollMs);
+  }
+  throw new Error(`Timed out waiting for ${selector}`);
+}
+
+function findAdvancedFilterByHeader(
+  overlay: ParentNode,
+  headerText: string,
+): Element | null {
+  const want = normalizeText(headerText);
+  const candidates = getByTagName<Element>(overlay, "advanced-filter");
+  for (const af of candidates) {
+    const h4 = af.querySelector(".filter-header h4");
+    if (!(h4 instanceof HTMLElement)) continue;
+    if (normalizeText(h4.textContent ?? "") === want) return af;
+  }
+  return null;
+}
+
+function clickRadioByLabel(root: ParentNode, labelText: string): boolean {
+  const want = normalizeText(labelText);
+  const labels = Array.from(root.querySelectorAll("label"));
+  for (const l of labels) {
+    if (!(l instanceof HTMLLabelElement)) continue;
+    if (normalizeText(l.textContent ?? "") !== want) continue;
+    const forId = l.getAttribute("for");
+    if (forId) {
+      const input = root.querySelector(`#${CSS.escape(forId)}`);
+      if (input instanceof HTMLInputElement) {
+        input.click();
+        return true;
+      }
+    }
+    const radio = l.querySelector('input[type="radio"]');
+    if (radio instanceof HTMLInputElement) {
+      radio.click();
+      return true;
+    }
+    const btn = l.closest("mat-radio-button");
+    if (btn instanceof HTMLElement) {
+      btn.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+function setInputValue(
+  el: HTMLInputElement,
+  value: string,
+  opts?: { blur?: boolean },
+): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const proto = (el as any).__proto__ as { value?: unknown } | undefined;
+    const desc = proto
+      ? Object.getOwnPropertyDescriptor(proto, "value")
+      : undefined;
+    if (desc?.set) desc.set.call(el, value);
+    else el.value = value;
+  } catch {
+    el.value = value;
+  }
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  if (opts?.blur ?? true)
+    el.dispatchEvent(new Event("blur", { bubbles: true }));
+}
+
+function clickElement(el: Element): void {
+  if (el instanceof HTMLElement) {
+    el.click();
+    return;
+  }
+  (el as unknown as { click?: () => void }).click?.();
+}
+
+function findButtonLikeByText(
+  root: ParentNode,
+  text: string,
+): HTMLElement | null {
+  const want = normalizeText(text);
+  const els = Array.from(root.querySelectorAll("button,[role='menuitem']"));
+  for (const el of els) {
+    if (!(el instanceof HTMLElement)) continue;
+    const t = normalizeText(el.textContent ?? "");
+    if (!t) continue;
+    if (t === want || t.includes(want)) return el;
+  }
+  return null;
+}
+
+async function waitForCheckboxChecked(
+  input: HTMLInputElement,
+  opts: { timeoutMs: number; signal?: AbortSignal },
+): Promise<boolean> {
+  const started = Date.now();
+  while (Date.now() - started < opts.timeoutMs) {
+    if (opts.signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+    if (input.checked) return true;
+    await sleep(50);
+  }
+  return input.checked;
+}
+
+async function configureResultsTableView(
+  searchKeywords: string[],
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!Array.isArray(searchKeywords) || searchKeywords.length === 0) {
+    await log(
+      "Table view: no columns configured; skipping view configuration.",
+    );
+    return;
+  }
+
+  // Settings button exists only once results header is rendered.
+  // Wait for results UI to render after filters change.
+  await waitForResultsRoot(15_000, signal);
+
+  const settingsSelector = SELECTORS.resultsHeaderSettingsButton.join(",");
+  const settings = await waitForElement(settingsSelector, {
+    timeoutMs: 15_000,
+    signal,
+  });
+
+  // Don't blindly click Settings; it toggles the menu open/closed.
+  // If the menu is already open, avoid clicking (which would close it).
+  let menu = findOpenMenuPanel();
+  if (!menu) {
+    clickElement(settings);
+    await log('Clicked results header "Settings"');
+    await sleep(DELAYS.afterSettingsClickMs);
+    // Wait for menu panel to actually open.
+    const maybeMenu = await waitForElement(SELECTORS.menuPanel.join(","), {
+      timeoutMs: 8000,
+      signal,
+    });
+    menu = isElementDisplayed(maybeMenu) ? maybeMenu : findOpenMenuPanel();
+  } else {
+    await log('Settings menu already open; not clicking "Settings" again.');
+  }
+
+  if (!menu) {
+    await log("Settings menu did not open (skipping).");
+    return;
+  }
+  await sleep(DELAYS.afterMenuOpenMs);
+
+  const editTable = findButtonLikeByText(menu, "Edit table view");
+  if (!editTable) {
+    await log(
+      'Settings menu opened, but "Edit table view" was not found (skipping).',
+    );
+    return;
+  }
+  clickElement(editTable);
+  await log('Clicked "Edit table view"');
+
+  // Wait for Edit View dialog and its filter input.
+  const dialog = await waitForElement(SELECTORS.editViewDialog.join(","), {
+    timeoutMs: 10_000,
+    signal,
+  });
+
+  const filterInputEl = (await waitForElement(
+    SELECTORS.editViewFilterInput.join(","),
+    { timeoutMs: 10_000, signal, root: dialog },
+  )) as Element;
+  if (!(filterInputEl instanceof HTMLInputElement)) {
+    await log("Edit View: could not locate filter input (skipping).");
+    return;
+  }
+
+  const getResultsRoot = (): Element | ParentNode => {
+    // Scope specifically to the "Results" list inside panel-search-results,
+    // so we don't accidentally target checkboxes in "Selected Columns".
+    return (
+      dialog.querySelector("panel-search-results mat-action-list") ??
+      dialog.querySelector("panel-search-results") ??
+      dialog
+    );
+  };
+
+  const findVisibleResultCheckboxInputs = (): HTMLInputElement[] => {
+    const root = getResultsRoot();
+    const inputs = Array.from(
+      root.querySelectorAll("mat-checkbox input[type='checkbox']"),
+    ).filter((el): el is HTMLInputElement => el instanceof HTMLInputElement);
+
+    // De-dupe in case Crunchbase renders duplicate panels.
+    return Array.from(new Set(inputs));
+  };
+
+  const clickAllVisibleUnchecked = async (
+    inputs: HTMLInputElement[],
+  ): Promise<number> => {
+    let clicked = 0;
+    for (const input of inputs) {
+      if (signal?.aborted) {
+        const err = new Error("Cancelled by user");
+        err.name = "AbortError";
+        throw err;
+      }
+      if (input.checked || input.disabled) continue;
+
+      // Prefer clicking the label (larger hitbox).
+      const lbl = input.closest("mat-checkbox")?.querySelector("label") ?? null;
+      if (lbl) clickElement(lbl);
+      else clickElement(input);
+
+      // Keep per-checkbox latency bounded; we'll encounter the row again on the
+      // next visibility/scroll pass if the click didn't take.
+      await waitForCheckboxChecked(input, { timeoutMs: 100, signal }).catch(
+        () => undefined,
+      );
+      clicked += 1;
+      await sleep(100);
+    }
+    return clicked;
+  };
+
+  // For each keyword: type → check all visible result checkboxes.
+  for (const keyword of searchKeywords) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+
+    await log(`Edit View: selecting all matches for "${keyword}"…`);
+    filterInputEl.focus();
+    // Don't blur here; the suggestions/results panel is driven by focus + input.
+    setInputValue(filterInputEl, keyword, { blur: false });
+
+    // Wait for results to settle/render after typing.
+    const started = Date.now();
+    let inputs: HTMLInputElement[] = [];
+    while (Date.now() - started < 9000) {
+      if (signal?.aborted) {
+        const err = new Error("Cancelled by user");
+        err.name = "AbortError";
+        throw err;
+      }
+      inputs = findVisibleResultCheckboxInputs();
+      // Heuristic: if at least one checkbox is present, proceed.
+      if (inputs.length > 0) break;
+      await sleep(120);
+    }
+
+    if (inputs.length === 0) {
+      await log(
+        `Edit View: no checkbox results found for "${keyword}" (skipping).`,
+      );
+    } else {
+      // Crunchbase renders the results list as a virtualized scroll region.
+      // We need to scroll through it and keep checking new items as they appear.
+      let checkedCount = 0;
+      const root = getResultsRoot();
+      const scrollBox =
+        (root instanceof Element ? getScrollParent(root) : null) ??
+        getScrollParent(filterInputEl) ??
+        (dialog instanceof Element ? getScrollParent(dialog) : null);
+
+      // If we can't find a scroll container, at least click what we can see.
+      if (!scrollBox) {
+        checkedCount += await clickAllVisibleUnchecked(inputs);
+      } else {
+        // Start from the top for each keyword to avoid missing early items.
+        try {
+          scrollBox.scrollTop = 0;
+        } catch {
+          /* ignore */
+        }
+        await sleep(80);
+
+        let lastScrollTop = -1;
+        let stagnantPasses = 0;
+        for (let pass = 0; pass < 80; pass++) {
+          if (signal?.aborted) {
+            const err = new Error("Cancelled by user");
+            err.name = "AbortError";
+            throw err;
+          }
+
+          const visible = findVisibleResultCheckboxInputs();
+          checkedCount += await clickAllVisibleUnchecked(visible);
+
+          const before = scrollBox.scrollTop;
+          const maxTop = Math.max(
+            0,
+            scrollBox.scrollHeight - scrollBox.clientHeight,
+          );
+          const atBottom = before >= maxTop - 2;
+          if (atBottom) break;
+
+          // Scroll down roughly one viewport to reveal new rows.
+          scrollBox.scrollTop = Math.min(
+            maxTop,
+            before + Math.max(220, scrollBox.clientHeight * 0.85),
+          );
+          await sleep(90);
+
+          const after = scrollBox.scrollTop;
+          if (after === lastScrollTop) stagnantPasses += 1;
+          else stagnantPasses = 0;
+          lastScrollTop = after;
+
+          // If we can't make progress scrolling, bail out.
+          if (stagnantPasses >= 4) break;
+        }
+      }
+      await log(
+        `Edit View: checked ${checkedCount} option${checkedCount === 1 ? "" : "s"} for "${keyword}".`,
+      );
+    }
+
+    // Clear input for next iteration and enforce 100ms pacing per column.
+    setInputValue(filterInputEl, "", { blur: false });
+    await sleep(DELAYS.afterToggleColumnMs);
+  }
+
+  const applyBtn = findButtonLikeByText(dialog, "Apply Changes");
+  if (!applyBtn) {
+    await log('Edit View: "Apply Changes" button not found (skipping).');
+    return;
+  }
+
+  const isApplyDisabled = (): boolean =>
+    (applyBtn instanceof HTMLButtonElement && applyBtn.disabled) ||
+    applyBtn.getAttribute("disabled") != null ||
+    applyBtn.classList.contains("mat-mdc-button-disabled");
+
+  // Click "Apply Changes". If it remains disabled, dismiss via the header Close button.
+  const enableStarted = Date.now();
+  while (isApplyDisabled() && Date.now() - enableStarted < 1500) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+    await sleep(120);
+  }
+
+  if (!isApplyDisabled()) {
+    clickElement(applyBtn);
+    await log('Clicked "Apply Changes"');
+  } else {
+    const closeBtn = dialog.querySelector(
+      'button[aria-label="Close"]',
+    ) as HTMLElement | null;
+    if (closeBtn) {
+      clickElement(closeBtn);
+      await log('Edit View: "Apply Changes" disabled; clicked Close.');
+    } else {
+      await log('Edit View: "Apply Changes" disabled and Close not found.');
+    }
+  }
+
+  // Wait for dialog to close.
+  const closeStarted = Date.now();
+  while (Date.now() - closeStarted < 12_000) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+    const stillOpen = document.querySelector(
+      SELECTORS.editViewDialog.join(","),
+    );
+    if (!stillOpen) break;
+    await sleep(120);
+  }
+  await sleep(DELAYS.afterApplyViewMs);
+  await log("Table view: applied column changes.");
+}
+
+function waitForResultsRoot(
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const selector = SELECTORS.resultsRoot.join(",");
+  return waitForElement(selector, { timeoutMs, signal }).then(() => undefined);
+}
+
+function hasNoResults(): boolean {
+  for (const sel of SELECTORS.noResults) {
+    const el = document.querySelector(sel);
+    if (el && (el.textContent ?? "").toLowerCase().includes("no results"))
+      return true;
+  }
+  return false;
+}
+
+async function applyFinancialsValuationDateFilter(
+  dateKey: string,
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const overlay = await waitForElement("filter-overlay", {
+    timeoutMs: 6500,
+    signal,
+  });
+
+  const adv = findAdvancedFilterByHeader(overlay, "Last Funding Date");
+  if (!adv) {
+    await log(
+      "Financials overlay opened, but Last Funding Date filter not found (continuing).",
+    );
+    return;
+  }
+
+  const clickedCustom = clickRadioByLabel(adv, "Custom Date Range");
+  if (!clickedCustom) {
+    await log(
+      "Last Funding Date: could not click Custom Date Range (continuing).",
+    );
+    return;
+  }
+  await log('Clicked "Custom Date Range"');
+
+  await sleep(DELAYS.afterCustomClickMs);
+
+  const inputs = Array.from(adv.querySelectorAll("input")).filter(
+    (x): x is HTMLInputElement => x instanceof HTMLInputElement && !x.disabled,
+  );
+
+  // Heuristic: once Custom Date Range is selected, the component renders exactly 2 inputs for start/end.
+  // If there are more, pick the last two (usually the date fields within this advanced-filter).
+  const dateInputs = inputs.filter(
+    (i) =>
+      i.type === "date" ||
+      i.getAttribute("placeholder")?.toLowerCase().includes("date"),
+  );
+  const pick = (dateInputs.length >= 2 ? dateInputs : inputs).slice(-2);
+  const start = pick[0];
+  const end = pick[1];
+
+  if (!start || !end) {
+    await log(
+      "Last Funding Date: could not find start/end inputs (continuing).",
+    );
+    return;
+  }
+
+  await log("Input start date…");
+  setInputValue(start, dateKey);
+  await sleep(DELAYS.afterSetDatesMs);
+  await log("Input end date…");
+  setInputValue(end, dateKey);
+  await sleep(DELAYS.afterSetDatesMs);
+  await log(`Last Funding Date: set custom range to ${dateKey} → ${dateKey}`);
+}
+
+function clickFilterGroupButtonByLabel(label: string): boolean {
+  const want = normalizeText(label);
+  const buttons = Array.from(
+    document.querySelectorAll(
+      "button.filter-group-button, button.mat-mdc-button-base",
+    ),
+  );
+
+  for (const b of buttons) {
+    if (!(b instanceof HTMLButtonElement)) continue;
+    const txt = normalizeText(b.textContent ?? "");
+    if (!txt) continue;
+    if (txt.includes(want)) {
+      b.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+export function assertDiscoverOrgPage(): void {
+  const path = window.location.pathname;
+  if (!path.includes("/discover/organization.companies")) {
+    throw new Error(
+      `Open this tab to Discover Organizations first:\nhttps://www.crunchbase.com${DISCOVER_ORGS_PATH}`,
+    );
+  }
+}
+
+/** Hint in URL for debugging; Crunchbase may ignore. */
+function applyDateHint(dateKey: string): void {
+  try {
+    const u = new URL(window.location.href);
+    u.searchParams.set("cb_date_hint", dateKey);
+    window.history.replaceState({}, "", u.toString());
+  } catch {
+    /* ignore */
+  }
+}
+
+function isNextControlDisabled(el: HTMLElement): boolean {
+  if (el instanceof HTMLButtonElement && el.disabled) return true;
+  if (el instanceof HTMLAnchorElement) {
+    if (el.hasAttribute("disabled")) return true;
+    if (el.getAttribute("aria-disabled") === "true") return true;
+  }
+  if (el.getAttribute("aria-disabled") === "true") return true;
+  if (el.classList.contains("mat-mdc-button-disabled")) return true;
+  return false;
+}
+
+function findNextButton(): HTMLElement | null {
+  for (const sel of SELECTORS.nextPage) {
+    const el = document.querySelector(sel);
+    if (el instanceof HTMLElement) return el;
+  }
+  return null;
+}
+
+function findResultsGridRoot(): Element | null {
+  return (
+    document.querySelector(".results-grid") ??
+    document.querySelector("sheet-grid .results-grid") ??
+    document.querySelector("sheet-grid")
+  );
+}
+
+function extractCellPlainText(cell: Element): string {
+  return (cell.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+function scrapeResultsGridHeaderColumnIds(root: ParentNode): string[] {
+  const headerRow = root.querySelector("grid-header-row");
+  if (!headerRow) return [];
+  const ids: string[] = [];
+  for (const cell of headerRow.querySelectorAll("grid-cell[data-columnid]")) {
+    const id = cell.getAttribute("data-columnid");
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+type DiscoverIdentifier = { permalink: string; image_id: string };
+type DiscoverRow = Record<string, unknown> & {
+  identifier?: DiscoverIdentifier;
+};
+
+function extractCrunchbaseImageId(url: string): string {
+  const s = (url ?? "").trim();
+  if (!s) return "";
+  // Common patterns:
+  // - https://images.crunchbase.com/image/upload/.../<image_id>?...
+  // - https://.../image/upload/<transforms>/<image_id>
+  // - Any URL whose last path segment is the id
+  try {
+    const u = new URL(s, window.location.origin);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1] ?? "";
+    const mLast32 = last.match(/^([a-f0-9]{32})$/i);
+    if (mLast32?.[1]) return mLast32[1];
+    // Sometimes the last segment is the id with extra suffixes; grab 32-hex inside it.
+    const mInner32 = last.match(/([a-f0-9]{32})/i);
+    if (mInner32?.[1]) return mInner32[1];
+  } catch {
+    // ignore
+  }
+  const m = s.match(/([a-f0-9]{32})/i);
+  return m?.[1] ?? "";
+}
+
+function extractAnyImageIdFromElement(el: Element): string {
+  const imgs = Array.from(el.querySelectorAll("img[src]")).filter(
+    (i): i is HTMLImageElement => i instanceof HTMLImageElement,
+  );
+  for (const img of imgs) {
+    const id = extractCrunchbaseImageId(img.src);
+    if (id) return id;
+  }
+  // Fallback: background-image URLs.
+  const styled = Array.from(el.querySelectorAll("*")).filter(
+    (n): n is HTMLElement => n instanceof HTMLElement,
+  );
+  for (const n of styled) {
+    const bg = n.style?.backgroundImage ?? "";
+    const m = bg.match(/url\(["']?([^"')]+)["']?\)/i);
+    const url = m?.[1] ?? "";
+    if (!url) continue;
+    const id = extractCrunchbaseImageId(url);
+    if (id) return id;
+  }
+  return "";
+}
+
+function parseCrunchbaseOrgPermalinkFromHref(href: string): string | null {
+  try {
+    const u = new URL(href, window.location.origin);
+    const path = u.pathname.replace(/\/+$/, "");
+    // Typical patterns:
+    // - /organization/<slug>
+    // - /organization/<slug>/company_financials
+    const m = path.match(/\/organization\/([^/]+)/i);
+    if (m?.[1]) return decodeURIComponent(m[1]);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+type MoneyValue = { value_usd: number | null; currency: string; value: number };
+
+function parseMoneyValue(raw: string): MoneyValue | null {
+  const s = raw.trim();
+  if (!s) return null;
+
+  // Common currency symbols and codes.
+  // Note: without FX data, we only set value_usd when currency is USD.
+  const currencyBySymbol: Record<string, string> = {
+    $: "USD",
+    "€": "EUR",
+    "£": "GBP",
+    "¥": "JPY",
+    "₩": "KRW",
+    "₹": "INR",
+  };
+
+  let currency: string | null = null;
+  let rest = s;
+
+  const symbol = s[0];
+  if (currencyBySymbol[symbol]) {
+    currency = currencyBySymbol[symbol];
+    rest = s.slice(1).trim();
+  } else {
+    const codeMatch = s.match(/^(USD|EUR|GBP|JPY|CNY|CAD|AUD|INR|KRW)\b/i);
+    if (codeMatch) {
+      currency = codeMatch[1].toUpperCase();
+      rest = s.slice(codeMatch[0].length).trim();
+    }
+  }
+
+  if (!currency) return null;
+
+  // Parse number with optional magnitude suffix.
+  // Accept: 2,500,000 | 2.5M | 2.5m | 250k | 1.2B
+  const magMatch = rest.match(/^([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMB])?$/i);
+  if (!magMatch) return null;
+  const num = Number(magMatch[1].replace(/,/g, ""));
+  if (!Number.isFinite(num)) return null;
+  const mag = (magMatch[2] ?? "").toUpperCase();
+  const mult = mag === "K" ? 1e3 : mag === "M" ? 1e6 : mag === "B" ? 1e9 : 1;
+  const value = Math.round(num * mult);
+  const value_usd = currency === "USD" ? value : null;
+  return { value_usd, currency, value };
+}
+
+type EntityIdentifier = {
+  permalink: string;
+  image_id: string;
+  uuid: string;
+  entity_def_id: "organization" | "person" | string;
+  value: string;
+};
+
+function parseEntityIdentifiersFromCell(cell: Element): EntityIdentifier[] {
+  const anchors = Array.from(cell.querySelectorAll("a[href]")).filter(
+    (a): a is HTMLAnchorElement => a instanceof HTMLAnchorElement,
+  );
+  const out: EntityIdentifier[] = [];
+  for (const a of anchors) {
+    const href = a.getAttribute("href") ?? "";
+    if (!href) continue;
+
+    let permalink = "";
+    let entity_def_id: string = "";
+    try {
+      const u = new URL(href, window.location.origin);
+      const path = u.pathname.replace(/\/+$/, "");
+      const mOrg = path.match(/\/organization\/([^/]+)/i);
+      const mPerson = path.match(/\/person\/([^/]+)/i);
+      if (mOrg?.[1]) {
+        permalink = decodeURIComponent(mOrg[1]);
+        entity_def_id = "organization";
+      } else if (mPerson?.[1]) {
+        permalink = decodeURIComponent(mPerson[1]);
+        entity_def_id = "person";
+      } else {
+        const seg = path.split("/").filter(Boolean).pop();
+        if (seg) permalink = decodeURIComponent(seg);
+      }
+    } catch {
+      // ignore
+    }
+
+    const value = (a.getAttribute("title") ?? a.textContent ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!value) continue;
+
+    const img = a.querySelector("img[src]") as HTMLImageElement | null;
+    const image_id = extractCrunchbaseImageId(img?.src ?? "");
+
+    const uuid =
+      a.getAttribute("data-uuid") ??
+      a.closest("[data-uuid]")?.getAttribute("data-uuid") ??
+      "";
+
+    out.push({ permalink, image_id, uuid, entity_def_id, value });
+  }
+
+  const seen = new Set<string>();
+  return out.filter((e) => {
+    const k = `${e.entity_def_id}::${e.permalink}::${e.value}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function normalizeRevenueRangeEnum(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^less than\s*\$?1m$/i.test(s)) return "r_00010000";
+  return null;
+}
+
+type FxRates = {
+  base: "USD";
+  rates: Record<string, number>;
+  fetchedAt: string;
+};
+
+let FX_RATES_PROMISE: Promise<FxRates | null> | null = null;
+
+async function getUsdFxRates(
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<FxRates | null> {
+  if (FX_RATES_PROMISE) return FX_RATES_PROMISE;
+  FX_RATES_PROMISE = (async () => {
+    try {
+      const url = "https://open.er-api.com/v6/latest/USD";
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error(`FX fetch failed: ${res.status}`);
+      const body = (await res.json()) as unknown;
+      if (!body || typeof body !== "object")
+        throw new Error("FX response invalid");
+      const o = body as Record<string, unknown>;
+      const rates = o.rates as Record<string, unknown> | undefined;
+      if (!rates || typeof rates !== "object")
+        throw new Error("FX rates missing");
+
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(rates)) {
+        if (typeof v === "number" && Number.isFinite(v) && v > 0) out[k] = v;
+      }
+      // Ensure USD is present.
+      out.USD = 1;
+      return { base: "USD", rates: out, fetchedAt: new Date().toISOString() };
+    } catch (e) {
+      await log(
+        `FX rates unavailable; leaving value_usd null for non-USD currencies: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    }
+  })();
+  return FX_RATES_PROMISE;
+}
+
+async function enrichUsdValuesInRows(
+  rows: DiscoverRow[],
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  let needsFx = false;
+  for (const r of rows) {
+    for (const v of Object.values(r)) {
+      if (
+        v &&
+        typeof v === "object" &&
+        "currency" in (v as object) &&
+        "value" in (v as object) &&
+        "value_usd" in (v as object)
+      ) {
+        const mv = v as MoneyValue;
+        if (mv.currency && mv.currency !== "USD" && mv.value_usd == null) {
+          needsFx = true;
+          break;
+        }
+      }
+    }
+    if (needsFx) break;
+  }
+  if (!needsFx) return;
+
+  const fx = await getUsdFxRates(log, signal);
+  if (!fx) return;
+
+  for (const r of rows) {
+    for (const [k, v] of Object.entries(r)) {
+      if (
+        v &&
+        typeof v === "object" &&
+        "currency" in (v as object) &&
+        "value" in (v as object) &&
+        "value_usd" in (v as object)
+      ) {
+        const mv = v as MoneyValue;
+        if (mv.currency === "USD") continue;
+        if (mv.value_usd != null) continue;
+        const rate = fx.rates[mv.currency];
+        if (!rate || !Number.isFinite(rate) || rate <= 0) continue;
+
+        // fx.rates is "1 USD = rate <currency>"
+        const usd = Math.round(mv.value / rate);
+        r[k] = { ...mv, value_usd: Number.isFinite(usd) ? usd : null };
+      }
+    }
+  }
+}
+
+function normalizeRangeValue(raw: string): string | null {
+  const s = raw.trim();
+  const m = s.match(/^(\d{1,6})\s*-\s*(\d{1,6})$/);
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const pad = (n: number) => String(Math.trunc(n)).padStart(5, "0");
+  return `c_${pad(a)}_${pad(b)}`;
+}
+
+function scrapeResultsGridRowsFromDom(root: ParentNode): DiscoverRow[] {
+  const out: DiscoverRow[] = [];
+  const candidates = root.querySelectorAll("grid-row");
+  for (const row of candidates) {
+    if (!(row instanceof Element)) continue;
+    if (!row.querySelector('grid-cell[data-columnid="identifier"]')) continue;
+    const cells = row.querySelectorAll("grid-cell[data-columnid]");
+    if (cells.length === 0) continue;
+    const rec: DiscoverRow = {};
+    for (const cell of cells) {
+      const id = cell.getAttribute("data-columnid");
+      if (!id) continue;
+      if (id === "identifier") {
+        const a = cell.querySelector("a[href]") as HTMLAnchorElement | null;
+        const img = cell.querySelector("img[src]") as HTMLImageElement | null;
+        const permalink = a?.href
+          ? parseCrunchbaseOrgPermalinkFromHref(a.href)
+          : null;
+        const imageId =
+          extractCrunchbaseImageId(img?.src ?? "") ||
+          extractAnyImageIdFromElement(cell);
+        if (permalink) {
+          // image_id is required downstream.
+          if (imageId) rec.identifier = { permalink, image_id: imageId };
+        } else if (imageId) {
+          // Still include image if we can; permalink may be missing in some rows.
+          rec.identifier = { permalink: "", image_id: imageId };
+        } else {
+          const t = extractCellPlainText(cell);
+          if (t && t !== "—") rec.identifier_label = t;
+        }
+        continue;
+      }
+
+      if (
+        id === "location_identifiers" ||
+        id === "location_group_identifiers"
+      ) {
+        const anchors = Array.from(cell.querySelectorAll("a[href]")).filter(
+          (a): a is HTMLAnchorElement => a instanceof HTMLAnchorElement,
+        );
+        const parsed: { permalink: string; value: string }[] = [];
+        for (const a of anchors) {
+          const href = a.getAttribute("href") ?? "";
+          const txt = (a.getAttribute("title") ?? a.textContent ?? "")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (!href || !txt) continue;
+
+          // Examples:
+          // /search/organizations/field/organization.companies/location_identifiers/tokyo-tokyo
+          // /search/organizations/field/organization.companies/location_group_identifiers/asia-pacific
+          const m = href
+            .replace(/\/+$/, "")
+            .match(
+              /\/(location_identifiers|location_group_identifiers)\/([^/]+)$/i,
+            );
+          if (!m?.[2]) continue;
+          const permalink = decodeURIComponent(m[2]);
+          parsed.push({ permalink, value: txt });
+        }
+        if (parsed.length > 0) {
+          rec[id] = parsed;
+          continue;
+        }
+        // Fall back to plain text if Crunchbase renders this cell without links.
+      }
+
+      if (id === "linkedin") {
+        const a = cell.querySelector(
+          'a[href*="linkedin.com"]',
+        ) as HTMLAnchorElement | null;
+        const href = a?.href?.trim() ?? "";
+        if (href) {
+          rec[id] = { value: href };
+          continue;
+        }
+      }
+
+      if (id === "twitter") {
+        const a = cell.querySelector(
+          'a[href*="twitter.com"], a[href*="x.com"]',
+        ) as HTMLAnchorElement | null;
+        const href = a?.href?.trim() ?? "";
+        if (href) {
+          rec[id] = { value: href };
+          continue;
+        }
+      }
+
+      if (id === "facebook") {
+        const a = cell.querySelector(
+          'a[href*="facebook.com"]',
+        ) as HTMLAnchorElement | null;
+        const href = a?.href?.trim() ?? "";
+        if (href) {
+          rec[id] = { value: href };
+          continue;
+        }
+      }
+
+      if (id === "investor_identifiers" || id === "founder_identifier") {
+        const ids = parseEntityIdentifiersFromCell(cell);
+        if (ids.length > 0) {
+          rec[id] =
+            id === "investor_identifiers"
+              ? ids.map(({ permalink, entity_def_id, value }) => ({
+                  permalink,
+                  entity_def_id,
+                  value,
+                }))
+              : ids;
+          continue;
+        }
+      }
+
+      const t = extractCellPlainText(cell);
+      // If any value is "—", omit the field for that company.
+      if (!t || t === "—") continue;
+
+      const pct = t.match(/^(-?\d+(?:\.\d+)?)\s*%$/);
+      if (pct?.[1]) {
+        rec[id] = pct[1];
+        continue;
+      }
+
+      if (id === "revenue_range") {
+        const norm = normalizeRevenueRangeEnum(t);
+        if (norm) {
+          rec[id] = norm;
+          continue;
+        }
+      }
+
+      const rangeNorm = normalizeRangeValue(t);
+      if (rangeNorm) {
+        rec[id] = rangeNorm;
+        continue;
+      }
+
+      const money = parseMoneyValue(t);
+      if (money) {
+        rec[id] = money;
+        continue;
+      }
+
+      rec[id] = t;
+    }
+    if (Object.keys(rec).length > 0) out.push(rec);
+  }
+  return out;
+}
+
+function mergeColumnOrder(headerIds: string[], rows: DiscoverRow[]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const id of headerIds) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      ordered.push(id);
+    }
+  }
+  for (const r of rows) {
+    for (const k of Object.keys(r)) {
+      if (!seen.has(k)) {
+        seen.add(k);
+        ordered.push(k);
+      }
+    }
+  }
+  return ordered;
+}
+
+function discoverRowDedupeKey(row: DiscoverRow): string {
+  const permalink = row.identifier?.permalink?.trim() ?? "";
+  if (permalink.length > 0) return permalink;
+  return JSON.stringify(row);
+}
+
+export async function runDiscoverScrape(
+  dateKey: string,
+  emitChunk: (record: ChunkRecord) => Promise<void>,
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<number> {
+  assertDiscoverOrgPage();
+  applyDateHint(dateKey);
+
+  const clickedFinancials = clickFilterGroupButtonByLabel("Financials");
+  if (clickedFinancials) {
+    await log('Clicked "Financials" button');
+    await sleep(DELAYS.afterFinancialsClickMs);
+    await log("Selected filter group: Financials");
+    try {
+      await applyFinancialsValuationDateFilter(dateKey, log, signal);
+    } catch (e) {
+      await log(
+        `Financials overlay automation failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  } else {
+    await log("Could not find Financials filter-group button (continuing).");
+  }
+
+  await log("Waiting 10s for results to reload after date change…");
+  await sleep(DELAYS.afterDatesResultsLoadMs);
+
+  // Configure table columns in the results view (optional but recommended).
+  // NOTE: Put your desired column labels here (exact strings you would type into the "Find a filter..." box).
+  // const TABLE_VIEW_COLUMNS: string[] = [
+  //   "Headquarters Regions", // location_group_identifiers
+  //   "Headquarters Location", // location_group_identifiers_text
+  //   "Operating Status",
+  //   "linkedin", // linkedin
+  //   "semrush monthly visits Growth", // semrush_visits_mom_pct
+  //   "semrush average visits (6 months)", // semrush_visits_latest_6_months_avg
+  //   "number of investors", // num_investors
+  //   "semrush visit duration", //semrush_visit_duration
+  //   "last funding date", //last_funding_at
+  //   "last equity funding amount", //last_equity_funding_total
+  //   "semrush bounce rate", //semrush_bounce_rate
+  //   "semrush bounce rate growth", //semrush_bounce_rate_mom_pct
+  //   "company type", //company_type
+  //   "semrush visit duration growth", //semrush_visit_duration_mom_pct
+  //   "founded date", //founded_on
+  //   "website", //website
+  //   "total equity funding amount", //equity_funding_total
+  //   "number of funding rounds", //num_funding_rounds
+  //   "number of articles", //num_articles
+  //   "contact email", //contact_email
+  //   "funding status", //funding_stage
+  //   "last funding amount", //last_funding_total
+  //   "trend scord (7days)", //rank_delta_d7
+  //   "trend scord (30days)", //rank_delta_d30
+  //   "trend scord (90days)", //rank_delta_d90
+  //   "full description", //description
+  //   "description", //short_description
+  //   "number of acquisitions", //num_acquisitions
+  //   "operating status", //operating_status
+  //   "number of lead investors", //num_lead_investors
+  //   "number of employees", //num_employees_enum
+  //   "total funding amount", //funding_total
+  //   "last equity funding type", //last_equity_funding_type
+  //   "acquisition status", //acquisition_status
+  //   "ipo status", //ipo_status
+  //   "semrush visit pageviews / visit", //semrush_visit_pageviews
+  //   "semrush visit pageviews / visit Growth", //semrush_visit_pageview_mom_pct
+  //   "rank_org_company", //cb rank (company)
+  //   "rank_org", //cb rank (organization)
+  //   "semrush global traffic rank", //semrush_global_rank
+  //   "semrush monthly rank growth", //semrush_global_rank_mom_pct
+  //   "semrush monthly rank change", //semrush_global_rank_mom
+  // ];
+  const TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS: string[] = [
+    "basic info",
+    "investor details",
+    "Team",
+    "Funding",
+    "investors",
+    "acquisitions",
+    "ipo & stock Price",
+    "rank & scores",
+    "contacts",
+    "web traffic by semrush",
+    "company tech stack",
+    "private data",
+  ];
+  try {
+    await configureResultsTableView(
+      TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
+      log,
+      signal,
+    );
+  } catch (e) {
+    await log(
+      `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  await log("Waiting for results table…");
+  try {
+    await waitForResultsRoot(20_000, signal);
+    await log("Results visible. Starting scrape…");
+  } catch {
+    await log("Results table not detected yet (continuing).");
+  }
+
+  let totalRows = 0;
+  const maxPages = 500;
+
+  // Scrape from DOM (no network JSON capture).
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+
+    await sleep(
+      pageIndex === 0
+        ? DELAYS.initialResultsSettleMs
+        : DELAYS.betweenPagesSettleMs,
+    );
+
+    if (hasNoResults()) {
+      await log("No results found for current filters.");
+      const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
+      const record: ChunkRecord = {
+        dateKey,
+        sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+        chunkId,
+        pageIndex: pageIndex + 1,
+        rowCount: 0,
+        capturedAt: new Date().toISOString(),
+        payload: {
+          mode: "dom-grid",
+          dateKey,
+          pageIndex: pageIndex + 1,
+          capturedUrl: window.location.href,
+          columns: [],
+          gridRows: [],
+          note: "no_results_found",
+        },
+      };
+      await emitChunk(record);
+      break;
+    }
+
+    const gridRoot = findResultsGridRoot();
+    const headerIds = gridRoot
+      ? scrapeResultsGridHeaderColumnIds(gridRoot)
+      : [];
+    const pageRows = gridRoot ? scrapeResultsGridRowsFromDom(gridRoot) : [];
+    await enrichUsdValuesInRows(pageRows, log, signal);
+
+    totalRows += pageRows.length;
+
+    const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
+    const record: ChunkRecord = {
+      dateKey,
+      sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+      chunkId,
+      pageIndex: pageIndex + 1,
+      rowCount: pageRows.length,
+      capturedAt: new Date().toISOString(),
+      payload: {
+        mode: "dom-grid",
+        dateKey,
+        pageIndex: pageIndex + 1,
+        capturedUrl: window.location.href,
+        columns: headerIds,
+        gridRows: pageRows,
+      },
+    };
+    await emitChunk(record);
+    await log(`Saved ${chunkId} (rows=${pageRows.length})`);
+
+    const next = findNextButton();
+    if (!next) {
+      await log("No Next control found — stopping pagination.");
+      break;
+    }
+    if (isNextControlDisabled(next)) {
+      await log("Next disabled — last page.");
+      break;
+    }
+
+    await log("Waiting 60s before clicking Next…");
+    await sleep(DELAYS.beforeNextClickMs);
+    next.click();
+    await log('Clicked "Next"');
+    await sleep(DELAYS.afterNextClickMs);
+    await log("Waiting 20s for next page results…");
+    await sleep(DELAYS.afterApplyFiltersWaitMs);
+  }
+
+  return totalRows;
+}
+
+export async function runDiscoverScrapeCurrentResults(
+  runKey: string,
+  emitChunk: (record: ChunkRecord) => Promise<void>,
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<{
+  totalRows: number;
+  columns: string[];
+  rows: DiscoverRow[];
+}> {
+  assertDiscoverOrgPage();
+
+  await log("Scrape mode: current search results (no filter automation).");
+  await log("Waiting for results table…");
+  try {
+    await waitForResultsRoot(12_000, signal);
+    await log("Results visible. Starting scrape…");
+  } catch {
+    await log("Results table not detected yet (continuing).");
+  }
+
+  let totalRows = 0;
+  const mergedRows: DiscoverRow[] = [];
+  const seenRowKeys = new Set<string>();
+  let columnOrder: string[] = [];
+  const maxPages = 500;
+
+  await log("Waiting 10s for results to load…");
+  await sleep(DELAYS.afterDatesResultsLoadMs);
+
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+
+    await sleep(
+      pageIndex === 0
+        ? DELAYS.initialResultsSettleMs
+        : DELAYS.betweenPagesSettleMs,
+    );
+
+    const gridRoot = findResultsGridRoot();
+    const pageRows = gridRoot ? scrapeResultsGridRowsFromDom(gridRoot) : [];
+    await enrichUsdValuesInRows(pageRows, log, signal);
+    if (gridRoot) {
+      const headerIds = scrapeResultsGridHeaderColumnIds(gridRoot);
+      if (headerIds.length > 0)
+        columnOrder = mergeColumnOrder(headerIds, mergedRows);
+    }
+
+    if (pageRows.length === 0 && hasNoResults()) {
+      await log("No results found for current filters.");
+      break;
+    }
+
+    let added = 0;
+    for (const r of pageRows) {
+      const key = discoverRowDedupeKey(r);
+      if (seenRowKeys.has(key)) continue;
+      seenRowKeys.add(key);
+      mergedRows.push(r);
+      added += 1;
+    }
+    columnOrder = mergeColumnOrder(columnOrder, mergedRows);
+    totalRows = mergedRows.length;
+
+    if (pageRows.length > 0) {
+      await log(
+        `Page ${pageIndex + 1}: scraped ${pageRows.length} row${pageRows.length === 1 ? "" : "s"} from the table (${added} new after de-dupe).`,
+      );
+    } else {
+      await log(
+        "Could not read results table rows yet — results may still be loading.",
+      );
+    }
+
+    const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
+    const record: ChunkRecord = {
+      dateKey: runKey,
+      sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+      chunkId,
+      pageIndex: pageIndex + 1,
+      rowCount: pageRows.length,
+      capturedAt: new Date().toISOString(),
+      payload: {
+        mode: "dom-grid",
+        runKey,
+        pageIndex: pageIndex + 1,
+        capturedUrl: window.location.href,
+        columns: columnOrder,
+        gridRows: pageRows,
+      },
+    };
+    await emitChunk(record);
+    await log(`Saved ${chunkId} (rows=${pageRows.length})`);
+
+    const next = findNextButton();
+    if (!next) {
+      await log("No Next control found — stopping pagination.");
+      break;
+    }
+    if (isNextControlDisabled(next)) {
+      await log("Next disabled — last page.");
+      break;
+    }
+
+    await log("Waiting 60s before clicking Next…");
+    await sleep(DELAYS.beforeNextClickMs);
+    next.click();
+    await log('Clicked "Next"');
+    await sleep(DELAYS.afterNextClickMs);
+    await log("Waiting 20s for next page results…");
+    await sleep(DELAYS.afterApplyFiltersWaitMs);
+  }
+
+  const columns = mergeColumnOrder(columnOrder, mergedRows);
+  return {
+    totalRows: mergedRows.length > 0 ? mergedRows.length : totalRows,
+    columns,
+    rows: mergedRows,
+  };
+}
