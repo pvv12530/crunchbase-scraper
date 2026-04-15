@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Loader2,
   Play,
   Square,
   Trash2,
@@ -644,6 +645,12 @@ export function App(): JSX.Element {
   const hasActiveJob = queueState?.activeDateKey != null;
   const hasPending = (queueState?.pending.length ?? 0) > 0;
   const queueBusy = hasActiveJob || hasPending;
+  const selectedQueued = hasValidSelectedDate
+    ? (queueState?.pending ?? []).includes(selectedDateKey)
+    : false;
+  const selectedRunning =
+    hasValidSelectedDate && queueState?.activeDateKey === selectedDateKey;
+  const selectedScrapeBusy = selectedQueued || selectedRunning;
 
   /** Prefer local import list so a new upload shows all dates immediately; use persisted batchOrder after reload. */
   const dateRows =
@@ -996,16 +1003,31 @@ export function App(): JSX.Element {
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4c8bf5] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
               "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none",
             ].join(" ")}
-            disabled={scrapeDisabled}
+            disabled={scrapeDisabled || selectedScrapeBusy}
             onClick={() => void onScrape()}
           >
-            <Play
-              className="relative h-[18px] w-[18px] shrink-0 text-white drop-shadow-sm"
-              size={18}
-              strokeWidth={2}
-              aria-hidden
-            />
-            <span className="relative">Scrape this date</span>
+            {selectedRunning ? (
+              <Loader2
+                className="relative h-[18px] w-[18px] shrink-0 animate-spin text-white drop-shadow-sm"
+                size={18}
+                strokeWidth={2}
+                aria-hidden
+              />
+            ) : (
+              <Play
+                className="relative h-[18px] w-[18px] shrink-0 text-white drop-shadow-sm"
+                size={18}
+                strokeWidth={2}
+                aria-hidden
+              />
+            )}
+            <span className="relative">
+              {selectedRunning
+                ? "Scraping…"
+                : selectedQueued
+                  ? "Queued…"
+                  : "Scrape this date"}
+            </span>
           </button>
           {/* <button
             type="button"
