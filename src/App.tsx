@@ -690,14 +690,6 @@ export function App(): JSX.Element {
 
   return (
     <div className="min-h-screen bg-[#0f1115] p-3 text-[13px] font-sans leading-snug text-[#e8eaef] antialiased">
-      <header className="mb-3">
-        <h1 className="mb-1 text-base font-semibold">Crunchbase Date Batch</h1>
-        <p className="m-0 text-xs text-[#9aa3b2]">
-          Pick a date on the calendar or import a CSV of dates (first column).
-          Scrapes use the active Crunchbase tab.
-        </p>
-      </header>
-
       <section className="mb-3">
         <span
           className={[
@@ -1015,7 +1007,7 @@ export function App(): JSX.Element {
             />
             <span className="relative">Scrape this date</span>
           </button>
-          <button
+          {/* <button
             type="button"
             className={btnBase}
             disabled={!isCb}
@@ -1023,7 +1015,7 @@ export function App(): JSX.Element {
             title="Scrape current filtered results on the Crunchbase tab (no JSON saved)"
           >
             Scrape results
-          </button>
+          </button> */}
         </div>
         <p className="mb-2 text-[11px] text-[#9aa3b2]">
           {!isCb
