@@ -699,7 +699,9 @@ async function rewindResultsToFirstPage(
       return;
     }
 
-    await log(`Waiting ${DELAYS.beforeNextClickMs / 1000}s before clicking Previous…`);
+    await log(
+      `Waiting ${DELAYS.beforeNextClickMs / 1000}s before clicking Previous…`,
+    );
     await sleep(DELAYS.beforeNextClickMs);
     p.click();
     await log('Clicked "Previous"');
@@ -1280,16 +1282,22 @@ export async function runDiscoverScrape(
   // ];
   const TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS: string[] = [
     "basic info",
+    "headquaters",
+    "status",
+    "description",
+    "number",
     "investor details",
     "Team",
     "Funding",
     "investors",
     "acquisitions",
-    "ipo & stock Price",
+    "M & A",
+    "IPO & Stock Price",
     "rank & scores",
+    "insights",
     "contacts",
-    "web traffic by semrush",
-    "company tech stack",
+    "Web Traffic by SEMrush",
+    "Company Tech Stack by G2 Stack",
     "private data",
   ];
   try {
