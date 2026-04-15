@@ -395,10 +395,51 @@ async function configureResultsTableView(
       // We need to scroll through it and keep checking new items as they appear.
       let checkedCount = 0;
       const root = getResultsRoot();
-      const scrollBox =
-        (root instanceof Element ? getScrollParent(root) : null) ??
-        getScrollParent(filterInputEl) ??
-        (dialog instanceof Element ? getScrollParent(dialog) : null);
+      const getResultsScrollBox = (): HTMLElement | null => {
+        const host =
+          (dialog.querySelector("panel-search-results") as Element | null) ??
+          (root instanceof Element ? root : null);
+
+        if (!host) return null;
+
+        // Prefer the actual results list container first.
+        // In many Crunchbase builds, results are in:
+        // panel-search-results .wrapper mat-action-list (scrollable).
+        const preferredSelectors = [
+          "panel-search-results .wrapper mat-action-list",
+          "panel-search-results mat-action-list",
+          ".wrapper mat-action-list",
+          "mat-action-list",
+
+          // Some builds use a virtual scroll viewport.
+          "cdk-virtual-scroll-viewport",
+          ".cdk-virtual-scroll-viewport",
+          "[class*='virtual-scroll']",
+
+          // Fallback wrappers that sometimes host the scrollbar.
+          "panel-search-results .wrapper",
+          ".drill-panels",
+          ".dialog-content-container",
+        ];
+        for (const sel of preferredSelectors) {
+          const el = host.querySelector(sel);
+          if (
+            el instanceof HTMLElement &&
+            el.scrollHeight > el.clientHeight + 4
+          ) {
+            return el;
+          }
+        }
+
+        // Fallback: find the closest scroll parent from likely anchors.
+        return (
+          getScrollParent(host) ??
+          getScrollParent(filterInputEl) ??
+          (dialog instanceof Element ? getScrollParent(dialog) : null)
+        );
+      };
+
+      const scrollBox = getResultsScrollBox();
 
       // If we can't find a scroll container, at least click what we can see.
       if (!scrollBox) {
@@ -407,6 +448,7 @@ async function configureResultsTableView(
         // Start from the top for each keyword to avoid missing early items.
         try {
           scrollBox.scrollTop = 0;
+          scrollBox.dispatchEvent(new Event("scroll"));
         } catch {
           /* ignore */
         }
@@ -437,6 +479,7 @@ async function configureResultsTableView(
             maxTop,
             before + Math.max(220, scrollBox.clientHeight * 0.85),
           );
+          scrollBox.dispatchEvent(new Event("scroll"));
           await sleep(90);
 
           const after = scrollBox.scrollTop;
@@ -1285,7 +1328,10 @@ export async function runDiscoverScrape(
     "headquaters",
     "status",
     "description",
+    "company type",
     "number",
+    "Date",
+    "last",
     "investor details",
     "Team",
     "Funding",
@@ -1295,7 +1341,7 @@ export async function runDiscoverScrape(
     "IPO & Stock Price",
     "rank & scores",
     "insights",
-    "contacts",
+    "contact",
     "Web Traffic by SEMrush",
     "Company Tech Stack by G2 Stack",
     "private data",
