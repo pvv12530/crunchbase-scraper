@@ -5,12 +5,6 @@ import * as storage from "../../storage";
 const SUPABASE_FN_UPLOAD_JSON =
   "https://gfxknuxbtkhomfodrrfr.supabase.co/functions/v1/upload-json";
 
-function todayKey(): string {
-  const t = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
-}
-
 function rowDedupeKey(row: Record<string, unknown>): string {
   const id = row.identifier;
   if (id && typeof id === "object" && "permalink" in id) {
@@ -116,8 +110,7 @@ export async function exportMergedJsonFromDateChunks(
   const totalRows = merged.length;
   const body = { entities: merged, count: totalRows };
   const jsonText = JSON.stringify(body, null, 2);
-  const uploadedDate = todayKey();
-  const filename = `crunchbase-scrape-results-${dateKey}-${uploadedDate}.json`;
+  const filename = `crunchbase-scrape-results-${dateKey}.json`;
 
   let downloadOk = false;
   try {
@@ -139,8 +132,8 @@ export async function exportMergedJsonFromDateChunks(
   let uploadOk = false;
   try {
     const fd = new FormData();
-    // Store this file under "today" while preserving the scraped date in the filename.
-    fd.append("date", uploadedDate);
+    // Store this file under the scraped date so per-date views can load it.
+    fd.append("date", dateKey);
     if (meta.groupId) fd.append("group_id", meta.groupId);
     fd.append(
       "file",

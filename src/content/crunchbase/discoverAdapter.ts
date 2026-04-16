@@ -1,4 +1,5 @@
 import type { ChunkRecord } from "@shared/models";
+import { injectPageHook, PAGE_HOOK_SOURCE } from "./pageBridge";
 import {
   clickElement,
   clickRadioByLabel,
@@ -643,10 +644,185 @@ function scrapeResultsGridHeaderColumnIds(root: ParentNode): string[] {
   return ids;
 }
 
-type DiscoverIdentifier = { permalink: string; image_id: string };
+type DiscoverIdentifier = {
+  permalink: string;
+  image_id: string;
+  value?: string;
+};
 type DiscoverRow = Record<string, unknown> & {
   identifier?: DiscoverIdentifier;
 };
+
+type OrgPreviewResponse = Record<string, unknown>;
+
+const ORG_PREVIEW_BY_PERMALINK = new Map<string, OrgPreviewResponse>();
+
+type PendingPreview = {
+  resolve: (v: OrgPreviewResponse | null) => void;
+  timer: number;
+};
+const ORG_PREVIEW_PENDING = new Map<string, PendingPreview>();
+let ORG_PREVIEW_LISTENER_INSTALLED = false;
+
+function ensureOrgPreviewNetworkInterceptorInstalled(): void {
+  injectPageHook();
+}
+
+function ensureOrgPreviewListenerInstalled(): void {
+  if (ORG_PREVIEW_LISTENER_INSTALLED) return;
+  ORG_PREVIEW_LISTENER_INSTALLED = true;
+
+  window.addEventListener("message", (ev: MessageEvent) => {
+    const d = ev.data as unknown;
+    if (!d || typeof d !== "object") return;
+    const msg = d as {
+      source?: unknown;
+      kind?: unknown;
+      url?: unknown;
+      body?: unknown;
+    };
+    if (msg.source !== PAGE_HOOK_SOURCE) return;
+    if (msg.kind !== "orgPreview") return;
+    const json = msg.body;
+    if (!json || typeof json !== "object") return;
+
+    // Since we hover sequentially, attribute any orgPreview response to the single pending hover.
+    if (ORG_PREVIEW_PENDING.size !== 1) return;
+    const key = Array.from(ORG_PREVIEW_PENDING.keys())[0] ?? "";
+    if (!key) return;
+
+    ORG_PREVIEW_BY_PERMALINK.set(key, json as OrgPreviewResponse);
+    const pending = ORG_PREVIEW_PENDING.get(key);
+    if (pending) {
+      window.clearTimeout(pending.timer);
+      ORG_PREVIEW_PENDING.delete(key);
+      pending.resolve(json as OrgPreviewResponse);
+    }
+  });
+}
+
+async function hoverAndCaptureOrgPreview(
+  permalinkKey: string,
+  anchor: HTMLAnchorElement,
+  signal?: AbortSignal,
+): Promise<OrgPreviewResponse | null> {
+  const key = (permalinkKey ?? "").trim();
+  if (!key) return null;
+  const cached = ORG_PREVIEW_BY_PERMALINK.get(key);
+  if (cached) return cached;
+
+  ensureOrgPreviewNetworkInterceptorInstalled();
+  ensureOrgPreviewListenerInstalled();
+
+  if (signal?.aborted) {
+    const err = new Error("Cancelled by user");
+    err.name = "AbortError";
+    throw err;
+  }
+
+  // Create the wait "slot" before triggering hover, so we don't miss very fast responses.
+  const wait = new Promise<OrgPreviewResponse | null>((resolve) => {
+    const existing = ORG_PREVIEW_PENDING.get(key);
+    if (existing) {
+      window.clearTimeout(existing.timer);
+      ORG_PREVIEW_PENDING.delete(key);
+    }
+    const t = window.setTimeout(() => {
+      ORG_PREVIEW_PENDING.delete(key);
+      resolve(null);
+    }, 10_000);
+    ORG_PREVIEW_PENDING.set(key, { resolve, timer: t });
+  });
+
+  window.postMessage({ type: "cb-hover/setCurrent", key }, "*");
+  // Give Crunchbase UI time to trigger the preview request.
+  await sleep(120);
+  if (signal?.aborted) {
+    const err = new Error("Cancelled by user");
+    err.name = "AbortError";
+    throw err;
+  }
+
+  // Trigger hover.
+  try {
+    anchor.dispatchEvent(
+      new MouseEvent("mouseenter", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }),
+    );
+    anchor.dispatchEvent(
+      new MouseEvent("mouseover", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }),
+    );
+  } catch {
+    // ignore
+  }
+
+  // Give the UI/network a moment to fire the request before we start waiting.
+  await sleep(900);
+  if (signal?.aborted) {
+    const err = new Error("Cancelled by user");
+    err.name = "AbortError";
+    throw err;
+  }
+
+  return await wait;
+}
+
+async function enrichOrganizationPreviewsInRows(
+  rowsWithAnchors: {
+    row: DiscoverRow;
+    anchor: HTMLAnchorElement;
+    key: string;
+  }[],
+  log: (t: string) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!Array.isArray(rowsWithAnchors) || rowsWithAnchors.length === 0) return;
+
+  let fetched = 0;
+  for (const it of rowsWithAnchors) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled by user");
+      err.name = "AbortError";
+      throw err;
+    }
+    const preview: any = await hoverAndCaptureOrgPreview(
+      it.key,
+      it.anchor,
+      signal,
+    );
+    if (preview) {
+      const location_identifiers =
+        preview.cards.overview_image_description.location_identifiers;
+      const identifier = preview.cards.overview_image_description.identifier;
+      (it.row as Record<string, unknown>).location_identifiers =
+        location_identifiers;
+      if (identifier !== undefined && identifier !== null) {
+        // Replace if present; add if missing.
+        (it.row as Record<string, unknown>).identifier = identifier;
+      }
+      (it.row as Record<string, unknown>).org_details = preview;
+      fetched += 1;
+    }
+    // Small spacing so hover-triggered requests don't overlap.
+    await sleep(250);
+  }
+
+  if (fetched > 0)
+    await log(
+      `Enriched ${fetched}/${rowsWithAnchors.length} row${rowsWithAnchors.length === 1 ? "" : "s"} with organization preview data.`,
+    );
+  else
+    await log(
+      `Hovered ${rowsWithAnchors.length} org row${rowsWithAnchors.length === 1 ? "" : "s"} but captured 0 org details responses (endpoint may differ or requests may be blocked).`,
+    );
+}
 
 type FxRates = {
   base: "USD";
@@ -743,8 +919,16 @@ async function enrichUsdValuesInRows(
   }
 }
 
-function scrapeResultsGridRowsFromDom(root: ParentNode): DiscoverRow[] {
+function scrapeResultsGridRowsFromDom(root: ParentNode): {
+  rows: DiscoverRow[];
+  orgAnchors: { row: DiscoverRow; anchor: HTMLAnchorElement; key: string }[];
+} {
   const out: DiscoverRow[] = [];
+  const orgAnchors: {
+    row: DiscoverRow;
+    anchor: HTMLAnchorElement;
+    key: string;
+  }[] = [];
   const candidates = root.querySelectorAll("grid-row");
   for (const row of candidates) {
     if (!(row instanceof Element)) continue;
@@ -755,21 +939,26 @@ function scrapeResultsGridRowsFromDom(root: ParentNode): DiscoverRow[] {
     for (const cell of cells) {
       const id = cell.getAttribute("data-columnid");
       if (!id) continue;
+
+      if (id === "location_identifiers") continue;
+
       if (id === "identifier") {
         const a = cell.querySelector("a[href]") as HTMLAnchorElement | null;
         const img = cell.querySelector("img[src]") as HTMLImageElement | null;
-        const permalink = a?.href
-          ? parseCrunchbaseOrgPermalinkFromHref(a.href)
-          : null;
+        const permalink =
+          (a?.href ? parseCrunchbaseOrgPermalinkFromHref(a.href) : null) || "";
         const imageId =
           extractCrunchbaseImageId(img?.src ?? "") ||
           extractAnyImageIdFromElement(cell);
-        if (permalink) {
-          // image_id is required downstream.
-          if (imageId) rec.identifier = { permalink, image_id: imageId };
-        } else if (imageId) {
-          // Still include image if we can; permalink may be missing in some rows.
-          rec.identifier = { permalink: "", image_id: imageId };
+        const value = (a?.getAttribute("title") ?? a?.textContent ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (a && permalink)
+          orgAnchors.push({ row: rec, anchor: a, key: permalink });
+
+        if (imageId) {
+          rec.identifier = { permalink, image_id: imageId, value };
         } else {
           const t = extractCellPlainText(cell);
           if (t && t !== "—") rec.identifier_label = t;
@@ -777,10 +966,7 @@ function scrapeResultsGridRowsFromDom(root: ParentNode): DiscoverRow[] {
         continue;
       }
 
-      if (
-        id === "location_identifiers" ||
-        id === "location_group_identifiers"
-      ) {
+      if (id === "location_group_identifiers") {
         const anchors = Array.from(cell.querySelectorAll("a[href]")).filter(
           (a): a is HTMLAnchorElement => a instanceof HTMLAnchorElement,
         );
@@ -893,7 +1079,7 @@ function scrapeResultsGridRowsFromDom(root: ParentNode): DiscoverRow[] {
     }
     if (Object.keys(rec).length > 0) out.push(rec);
   }
-  return out;
+  return { rows: out, orgAnchors };
 }
 
 function mergeColumnOrder(headerIds: string[], rows: DiscoverRow[]): string[] {
@@ -1128,8 +1314,12 @@ export async function runDiscoverScrape(
       const headerIds = gridRoot
         ? scrapeResultsGridHeaderColumnIds(gridRoot)
         : [];
-      const pageRows = gridRoot ? scrapeResultsGridRowsFromDom(gridRoot) : [];
+      const scraped = gridRoot
+        ? scrapeResultsGridRowsFromDom(gridRoot)
+        : { rows: [], orgAnchors: [] };
+      const pageRows = scraped.rows;
       await enrichUsdValuesInRows(pageRows, log, signal);
+      await enrichOrganizationPreviewsInRows(scraped.orgAnchors, log, signal);
 
       totalRows += pageRows.length;
       totalRowsForDate += pageRows.length;
@@ -1227,8 +1417,12 @@ export async function runDiscoverScrapeCurrentResults(
     );
 
     const gridRoot = findResultsGridRoot();
-    const pageRows = gridRoot ? scrapeResultsGridRowsFromDom(gridRoot) : [];
+    const scraped = gridRoot
+      ? scrapeResultsGridRowsFromDom(gridRoot)
+      : { rows: [], orgAnchors: [] };
+    const pageRows = scraped.rows;
     await enrichUsdValuesInRows(pageRows, log, signal);
+    await enrichOrganizationPreviewsInRows(scraped.orgAnchors, log, signal);
     if (gridRoot) {
       const headerIds = scrapeResultsGridHeaderColumnIds(gridRoot);
       if (headerIds.length > 0)

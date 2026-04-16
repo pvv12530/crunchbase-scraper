@@ -68,7 +68,6 @@ export async function enqueueFromImport(dates: string[]): Promise<void> {
   mem.batchOrder = [...next];
   mem.stagedAfterAbort = null;
   await broadcastQueue();
-  await tryStartNext();
 }
 
 /** User retry or manual scrape: prefer this date next (after current job if any). */

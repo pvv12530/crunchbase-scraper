@@ -19,27 +19,6 @@ function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
 }
 
-function pad2(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function dateKeyFromParts(y: number, m: number, d: number): string {
-  return `${y}-${pad2(m)}-${pad2(d)}`;
-}
-
-function parseDateKeyParts(
-  key: string,
-): { y: number; m: number; d: number } | null {
-  if (!isDateKey(key)) return null;
-  const [ys, ms, ds] = key.split("-");
-  const y = Number(ys);
-  const m = Number(ms);
-  const d = Number(ds);
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d))
-    return null;
-  return { y, m, d };
-}
-
 type ModeTab = "calendar" | "csv";
 
 const btnBase =
@@ -183,16 +162,6 @@ async function uploadJsonToSupabase(payload: {
   }
 }
 
-function labelForRow(
-  dateKey: string,
-  meta: DateRunMeta | undefined,
-  q: ScrapeQueueState | null,
-): string {
-  if (q?.activeDateKey === dateKey) return "running";
-  if (q?.pending.includes(dateKey)) return "queued";
-  return meta?.status ?? "idle";
-}
-
 export function App(): JSX.Element {
   const [runs, setRuns] = useState<DateRunMeta[]>([]);
   const [selectedDateKey, setSelectedDateKey] = useState<string>("");
@@ -211,12 +180,6 @@ export function App(): JSX.Element {
     text: "Checking active tab…",
   });
   const [modeTab, setModeTab] = useState<ModeTab>("calendar");
-  const [calendarView, setCalendarView] = useState<{ y: number; m: number }>(
-    () => {
-      const t = new Date();
-      return { y: t.getFullYear(), m: t.getMonth() + 1 };
-    },
-  );
   const prevModeTab = useRef<ModeTab>(modeTab);
   /** Last successful "Scrape results" snapshot (all paginated rows, all visible columns). */
 
@@ -324,17 +287,18 @@ export function App(): JSX.Element {
     const prev = prevModeTab.current;
     prevModeTab.current = modeTab;
     if (modeTab !== "calendar" || prev === "calendar") return;
-    const p = parseDateKeyParts(selectedDateKey);
-    if (p) setCalendarView({ y: p.y, m: p.m });
   }, [modeTab, selectedDateKey]);
 
   useEffect(() => {
     // Keep array selection in sync with single selection (CSV list, logs, etc.).
     if (!isDateKey(selectedDateKey)) return;
     setSelectedDateKeys((prev) =>
-      prev.length > 0 && prev.includes(selectedDateKey) ? prev : [selectedDateKey],
+      prev.length > 0 && prev.includes(selectedDateKey)
+        ? prev
+        : [selectedDateKey],
     );
-    if (!isDateKey(rangeAnchorRef.current)) rangeAnchorRef.current = selectedDateKey;
+    if (!isDateKey(rangeAnchorRef.current))
+      rangeAnchorRef.current = selectedDateKey;
   }, [selectedDateKey]);
 
   useEffect(() => {
@@ -370,7 +334,6 @@ export function App(): JSX.Element {
           : isDateKey(selectedDateKey)
             ? selectedDateKey
             : todayKey();
-      const downloadKey = todayKey();
       if (!isDateKey(selectedDateKey)) setSelectedDateKey(runKey);
       const startLog = 'Clicked "Scrape results"';
       setLogsByDate((prev) => {
@@ -416,13 +379,13 @@ export function App(): JSX.Element {
         typeof res?.totalRows === "number" ? res.totalRows : rows.length;
       const snapshot = { runKey, columns, rows, totalRows };
       void queueMicrotask(() =>
-        downloadScrapeResultsJsonFile({ ...snapshot, runKey: downloadKey }),
+        downloadScrapeResultsJsonFile({ ...snapshot, runKey }),
       );
       void queueMicrotask(async () => {
         try {
           const body = { entities: rows, count: totalRows };
           const jsonText = JSON.stringify(body, null, 2);
-          const filename = `crunchbase-scrape-results-${downloadKey}.json`;
+          const filename = `crunchbase-scrape-results-${runKey}.json`;
           await uploadJsonToSupabase({
             date: runKey,
             filename,
@@ -452,7 +415,7 @@ export function App(): JSX.Element {
           {
             at: new Date().toISOString(),
             level: "info" as const,
-            text: `Saved JSON download: crunchbase-scrape-results-${downloadKey}.json`,
+            text: `Saved JSON download: crunchbase-scrape-results-${runKey}.json`,
           },
         ].slice(-LOGS_MAX_PER_DATE);
         return { ...prev, [runKey]: next };
@@ -532,11 +495,13 @@ export function App(): JSX.Element {
 
   const onScrape = async () => {
     const dates =
-      Array.isArray(selectedDateKeys) && selectedDateKeys.length > 0
-        ? selectedDateKeys
-        : isDateKey(selectedDateKey)
-          ? [selectedDateKey]
-          : [];
+      modeTab === "csv"
+        ? importedDateOrder
+        : Array.isArray(selectedDateKeys) && selectedDateKeys.length > 0
+          ? selectedDateKeys
+          : isDateKey(selectedDateKey)
+            ? [selectedDateKey]
+            : [];
     const runKey = dates[0] ?? selectedDateKey;
     setLogsByDate((prev) => {
       const cur = prev[runKey] ?? [];
@@ -553,7 +518,21 @@ export function App(): JSX.Element {
       ].slice(-LOGS_MAX_PER_DATE);
       return { ...prev, [runKey]: next };
     });
-    if (dates.length > 1) {
+    if (modeTab === "csv") {
+      const first = dates[0];
+      if (first) setSelectedDateKey(first);
+      const groupId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      await chrome.runtime.sendMessage({
+        type: "scrape/start",
+        dateKey: first ?? runKey,
+        dateKeys: dates,
+        groupId,
+        sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+      } satisfies ExtensionMessage);
+    } else if (dates.length > 1) {
       const groupId =
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? crypto.randomUUID()
@@ -573,10 +552,6 @@ export function App(): JSX.Element {
       } satisfies ExtensionMessage);
     }
     void loadQueueState();
-  };
-
-  const onScrapeResults = async () => {
-    await runScrapeResults();
   };
 
   const onClearLogHistory = () => {
@@ -628,6 +603,7 @@ export function App(): JSX.Element {
         const first = dates[0];
         if (first) setSelectedDateKey(first);
       }
+      setSelectedDateKeys(dates);
       setModeTab("csv");
       void loadRuns();
       void loadQueueState();
@@ -735,8 +711,6 @@ export function App(): JSX.Element {
           }}
           onActiveDateKeyChange={(dk) => {
             setSelectedDateKey(dk);
-            const p = parseDateKeyParts(dk);
-            if (p) setCalendarView({ y: p.y, m: p.m });
           }}
           btnBaseClassName={btnBase}
         />
@@ -806,87 +780,6 @@ export function App(): JSX.Element {
                 {csvHint}
               </p>
             ) : null}
-          </section>
-
-          <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="m-0 text-xs font-medium text-[#9aa3b2]">
-                Dates from CSV
-              </h2>
-              <div className="flex flex-wrap gap-1.5">
-                <button
-                  type="button"
-                  className={`${btnBase} flex items-center gap-1`}
-                  disabled={!hasActiveJob}
-                  onClick={() => void onStop()}
-                  title="Stop the current date only; remaining dates stay queued"
-                >
-                  <Square className="h-3.5 w-3.5" aria-hidden />
-                  Stop
-                </button>
-                <button
-                  type="button"
-                  className={btnBase}
-                  disabled={!queueBusy}
-                  onClick={() => void onClearQueue()}
-                  title="Remove pending dates and stop the active scrape"
-                >
-                  Clear queue
-                </button>
-              </div>
-            </div>
-            {dateRows.length === 0 ? (
-              <p className="m-0 rounded-md border border-dashed border-[#2a3140] bg-[#12151c]/80 px-3 py-6 text-center text-[12px] text-[#9aa3b2]">
-                Upload a CSV to list dates and their scrape status.
-              </p>
-            ) : (
-              <ul className="m-0 max-h-[min(220px,40vh)] list-none space-y-1 overflow-y-auto p-0">
-                {dateRows.map((dk) => {
-                  const rowMeta = runForDate(dk);
-                  const label = labelForRow(dk, rowMeta, queueState);
-                  const sel = selectedDateKey === dk;
-                  return (
-                    <li
-                      key={dk}
-                      className={[
-                        "flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs",
-                        sel
-                          ? "border-[#4c8bf5] bg-[#4c8bf5]/10"
-                          : "border-[#2a3140] bg-[#12151c]",
-                      ].join(" ")}
-                    >
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 truncate text-left text-[#e8eaef]"
-                        onClick={() => setSelectedDateKey(dk)}
-                      >
-                        {dk}
-                        <span className="ml-2 text-[#9aa3b2]">— {label}</span>
-                        {rowMeta?.errorMessage ? (
-                          <span className="ml-1 text-[#f0a96e]">
-                            ({rowMeta.errorMessage.slice(0, 80)}
-                            {(rowMeta.errorMessage.length ?? 0) > 80
-                              ? "…"
-                              : ""}
-                            )
-                          </span>
-                        ) : null}
-                      </button>
-                      <button
-                        type="button"
-                        className={`${btnBase} shrink-0 py-1`}
-                        disabled={
-                          !isCb || label === "running" || label === "queued"
-                        }
-                        onClick={() => void onRetryRow(dk)}
-                      >
-                        Retry
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
           </section>
         </>
       )}

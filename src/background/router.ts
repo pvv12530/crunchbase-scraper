@@ -87,46 +87,50 @@ export function initMessageRouter(): void {
       /** Content script messages: handle here, single async path */
       if (sender.tab?.id != null && message.type.startsWith("content/")) {
         void (async () => {
-          switch (message.type) {
-            case "content/chunk":
-              await onContentChunk(message.record.dateKey, message.record);
-              sendResponse({ ok: true });
-              return;
-            case "content/done":
-              await handleContentDone(message.dateKey, message.totalRows);
-              sendResponse({ ok: true });
-              return;
-            case "content/log":
-              console.log(`[crunchbase ${message.dateKey}]`, message.text);
-              chrome.runtime
-                .sendMessage({
-                  type: "scrape/log",
-                  dateKey: message.dateKey,
-                  level: message.level,
-                  text: message.text,
-                  at: new Date().toISOString(),
-                } satisfies ExtensionMessage)
-                .catch(() => {});
-              sendResponse({ ok: true });
-              return;
-            case "content/error":
-              if (message.cancelled === true) {
-                await handleContentCancelled(
-                  message.dateKey,
-                  message.message,
-                  message.partial,
-                );
-              } else {
-                await handleContentError(
-                  message.dateKey,
-                  message.message,
-                  message.partial,
-                );
-              }
-              sendResponse({ ok: true });
-              return;
-            default:
-              sendResponse({ ok: false });
+          try {
+            switch (message.type) {
+              case "content/chunk":
+                await onContentChunk(message.record.dateKey, message.record);
+                sendResponse({ ok: true });
+                return;
+              case "content/done":
+                await handleContentDone(message.dateKey, message.totalRows);
+                sendResponse({ ok: true });
+                return;
+              case "content/log":
+                console.log(`[crunchbase ${message.dateKey}]`, message.text);
+                chrome.runtime
+                  .sendMessage({
+                    type: "scrape/log",
+                    dateKey: message.dateKey,
+                    level: message.level,
+                    text: message.text,
+                    at: new Date().toISOString(),
+                  } satisfies ExtensionMessage)
+                  .catch(() => {});
+                sendResponse({ ok: true });
+                return;
+              case "content/error":
+                if (message.cancelled === true) {
+                  await handleContentCancelled(
+                    message.dateKey,
+                    message.message,
+                    message.partial,
+                  );
+                } else {
+                  await handleContentError(
+                    message.dateKey,
+                    message.message,
+                    message.partial,
+                  );
+                }
+                sendResponse({ ok: true });
+                return;
+              default:
+                sendResponse({ ok: false });
+            }
+          } catch (e) {
+            sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
           }
         })();
         return true;

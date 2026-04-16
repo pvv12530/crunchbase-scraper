@@ -29,11 +29,15 @@ export default defineConfig({
         background: path.resolve(root, 'src/background/index.ts'),
         index: path.resolve(root, 'index.html'),
         'content/crunchbase': path.resolve(root, 'src/content/crunchbase/index.ts'),
+        'content/pageHook': path.resolve(root, 'src/content/crunchbase/pageHookMain.ts'),
       },
       output: {
         entryFileNames: (chunkInfo) => {
           if (chunkInfo.name === 'content/crunchbase') {
             return 'content/crunchbase.js';
+          }
+          if (chunkInfo.name === 'content/pageHook') {
+            return 'content/pageHook.js';
           }
           return '[name].js';
         },

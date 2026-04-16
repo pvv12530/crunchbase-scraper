@@ -52,6 +52,20 @@ export function buildPageHookInlineScript(): string {
 }
 
 export function injectPageHook(): void {
+  // Prefer injecting a bundled file via extension URL (works with strict CSP).
+  try {
+    const src = chrome?.runtime?.getURL?.('content/pageHook.js');
+    if (src) {
+      const el = document.createElement('script');
+      el.src = src;
+      el.async = false;
+      (document.head || document.documentElement).appendChild(el);
+      el.remove();
+      return;
+    }
+  } catch {
+    // fall back to inline
+  }
   const el = document.createElement('script');
   el.textContent = buildPageHookInlineScript();
   (document.head || document.documentElement).appendChild(el);
