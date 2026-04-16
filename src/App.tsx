@@ -1,18 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  Loader2,
-  Play,
-  Square,
-  Trash2,
-  Upload,
-} from "lucide-react";
+import { Download, Loader2, Play, Square, Trash2, Upload } from "lucide-react";
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
 import type { DateRunMeta, ScrapeQueueState } from "@shared/models";
 import { triggerDownload } from "./export/download";
+import { Calendar } from "./components/Calendar";
 
 const SUPABASE_JSON_PUBLIC_BASE =
   "https://gfxknuxbtkhomfodrrfr.supabase.co/storage/v1/object/public/json-files/";
@@ -26,8 +18,6 @@ function todayKey(): string {
 function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
 }
-
-const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -48,15 +38,6 @@ function parseDateKeyParts(
   if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d))
     return null;
   return { y, m, d };
-}
-
-function daysInMonth(year: number, month1to12: number): number {
-  return new Date(year, month1to12, 0).getDate();
-}
-
-/** First weekday 0=Sun for the first day of month (month 1–12). */
-function firstWeekdayOfMonth(year: number, month1to12: number): number {
-  return new Date(year, month1to12 - 1, 1).getDay();
 }
 
 type ModeTab = "calendar" | "csv";
@@ -215,6 +196,8 @@ function labelForRow(
 export function App(): JSX.Element {
   const [runs, setRuns] = useState<DateRunMeta[]>([]);
   const [selectedDateKey, setSelectedDateKey] = useState<string>("");
+  const [selectedDateKeys, setSelectedDateKeys] = useState<string[]>([]);
+  const rangeAnchorRef = useRef<string>("");
   const selectedDateKeyRef = useRef(selectedDateKey);
   selectedDateKeyRef.current = selectedDateKey;
   const [importedDateOrder, setImportedDateOrder] = useState<string[]>([]);
@@ -344,6 +327,15 @@ export function App(): JSX.Element {
     const p = parseDateKeyParts(selectedDateKey);
     if (p) setCalendarView({ y: p.y, m: p.m });
   }, [modeTab, selectedDateKey]);
+
+  useEffect(() => {
+    // Keep array selection in sync with single selection (CSV list, logs, etc.).
+    if (!isDateKey(selectedDateKey)) return;
+    setSelectedDateKeys((prev) =>
+      prev.length > 0 && prev.includes(selectedDateKey) ? prev : [selectedDateKey],
+    );
+    if (!isDateKey(rangeAnchorRef.current)) rangeAnchorRef.current = selectedDateKey;
+  }, [selectedDateKey]);
 
   useEffect(() => {
     void (async () => {
@@ -539,23 +531,47 @@ export function App(): JSX.Element {
   }, [selectedDateKey]);
 
   const onScrape = async () => {
+    const dates =
+      Array.isArray(selectedDateKeys) && selectedDateKeys.length > 0
+        ? selectedDateKeys
+        : isDateKey(selectedDateKey)
+          ? [selectedDateKey]
+          : [];
+    const runKey = dates[0] ?? selectedDateKey;
     setLogsByDate((prev) => {
-      const cur = prev[selectedDateKey] ?? [];
+      const cur = prev[runKey] ?? [];
       const next = [
         ...cur,
         {
           at: new Date().toISOString(),
           level: "info" as const,
-          text: "Clicked scrape button",
+          text:
+            dates.length > 1
+              ? `Clicked scrape button (dates=${dates.length})`
+              : "Clicked scrape button",
         },
       ].slice(-LOGS_MAX_PER_DATE);
-      return { ...prev, [selectedDateKey]: next };
+      return { ...prev, [runKey]: next };
     });
-    await chrome.runtime.sendMessage({
-      type: "scrape/retryDate",
-      dateKey: selectedDateKey,
-      sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
-    } satisfies ExtensionMessage);
+    if (dates.length > 1) {
+      const groupId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      await chrome.runtime.sendMessage({
+        type: "scrape/start",
+        dateKey: runKey,
+        dateKeys: dates,
+        groupId,
+        sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+      } satisfies ExtensionMessage);
+    } else {
+      await chrome.runtime.sendMessage({
+        type: "scrape/retryDate",
+        dateKey: selectedDateKey,
+        sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+      } satisfies ExtensionMessage);
+    }
     void loadQueueState();
   };
 
@@ -662,39 +678,6 @@ export function App(): JSX.Element {
 
   const selectedLogs = logsByDate[selectedDateKey] ?? [];
 
-  const calendarYear = calendarView.y;
-  const calendarMonth = calendarView.m;
-  const dim = daysInMonth(calendarYear, calendarMonth);
-  const lead = firstWeekdayOfMonth(calendarYear, calendarMonth);
-  const today = todayKey();
-  const calendarCells: ({ day: number } | null)[] = [];
-  for (let i = 0; i < lead; i++) calendarCells.push(null);
-  for (let d = 1; d <= dim; d++) calendarCells.push({ day: d });
-  while (calendarCells.length % 7 !== 0) calendarCells.push(null);
-  while (calendarCells.length < 42) calendarCells.push(null);
-
-  const monthTitle = new Date(
-    calendarYear,
-    calendarMonth - 1,
-    1,
-  ).toLocaleString(undefined, { month: "long", year: "numeric" });
-
-  const bumpCalendarMonth = (delta: number) => {
-    setCalendarView((cur) => {
-      let m = cur.m + delta;
-      let y = cur.y;
-      while (m > 12) {
-        m -= 12;
-        y += 1;
-      }
-      while (m < 1) {
-        m += 12;
-        y -= 1;
-      }
-      return { y, m };
-    });
-  };
-
   return (
     <div className="min-h-screen bg-[#0f1115] p-3 text-[13px] font-sans leading-snug text-[#e8eaef] antialiased">
       <section className="mb-3">
@@ -744,97 +727,19 @@ export function App(): JSX.Element {
       </div>
 
       {modeTab === "calendar" ? (
-        <section
-          className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5"
-          aria-label="Calendar"
-        >
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <button
-              type="button"
-              className={`${btnBase} px-2 py-2`}
-              onClick={() => bumpCalendarMonth(-1)}
-              aria-label="Previous month"
-            >
-              <ChevronLeft className="h-4 w-4" aria-hidden />
-            </button>
-            <h2 className="m-0 min-w-0 flex-1 text-center text-sm font-medium text-[#e8eaef]">
-              {monthTitle}
-            </h2>
-            <button
-              type="button"
-              className={`${btnBase} px-2 py-2`}
-              onClick={() => bumpCalendarMonth(1)}
-              aria-label="Next month"
-            >
-              <ChevronRight className="h-4 w-4" aria-hidden />
-            </button>
-          </div>
-          <div className="grid grid-cols-7 gap-0.5 text-center text-[10px] font-medium uppercase tracking-wide text-[#9aa3b2]">
-            {WEEKDAY_LABELS.map((w) => (
-              <div key={w} className="py-1">
-                {w}
-              </div>
-            ))}
-          </div>
-          <div className="mt-0.5 grid grid-cols-7 gap-0.5">
-            {calendarCells.map((cell, idx) => {
-              if (!cell) {
-                return (
-                  <div
-                    key={`pad-${idx}`}
-                    className="aspect-square min-h-8"
-                  />
-                );
-              }
-              const dk = dateKeyFromParts(
-                calendarYear,
-                calendarMonth,
-                cell.day,
-              );
-              const isSel = hasValidSelectedDate && selectedDateKey === dk;
-              const isTodayCell = today === dk;
-              return (
-                <button
-                  key={dk}
-                  type="button"
-                  className={[
-                    "flex aspect-square min-h-8 items-center justify-center rounded-lg border text-xs font-medium transition-colors",
-                    isSel
-                      ? "border-[#4c8bf5] bg-[#4c8bf5]/20 text-[#e8eaef]"
-                      : "border-transparent bg-[#12151c] text-[#e8eaef] hover:border-[#3a4354] hover:bg-[#1e2430]",
-                    isTodayCell && !isSel ? "ring-1 ring-[#6ea8ff]/50" : "",
-                  ].join(" ")}
-                  onClick={() => {
-                    setSelectedDateKey(dk);
-                  }}
-                >
-                  {cell.day}
-                </button>
-              );
-            })}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#2a3140] pt-3">
-            <p className="m-0 text-xs text-[#9aa3b2]">
-              Selected:{" "}
-              <span className="font-medium text-[#e8eaef]">
-                {hasValidSelectedDate ? selectedDateKey : "—"}
-              </span>
-            </p>
-            <button
-              type="button"
-              className={btnBase}
-              onClick={() => {
-                const t = todayKey();
-                setSelectedDateKey(t);
-                const p = parseDateKeyParts(t);
-                if (p) setCalendarView({ y: p.y, m: p.m });
-              }}
-              title="Jump to today"
-            >
-              Today
-            </button>
-          </div>
-        </section>
+        <Calendar
+          value={selectedDateKeys}
+          onChange={(next) => {
+            setSelectedDateKeys(next);
+            if (next[0]) setSelectedDateKey(next[next.length - 1] ?? next[0]);
+          }}
+          onActiveDateKeyChange={(dk) => {
+            setSelectedDateKey(dk);
+            const p = parseDateKeyParts(dk);
+            if (p) setCalendarView({ y: p.y, m: p.m });
+          }}
+          btnBaseClassName={btnBase}
+        />
       ) : (
         <>
           <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">

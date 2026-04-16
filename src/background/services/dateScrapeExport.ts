@@ -116,7 +116,8 @@ export async function exportMergedJsonFromDateChunks(
   const totalRows = merged.length;
   const body = { entities: merged, count: totalRows };
   const jsonText = JSON.stringify(body, null, 2);
-  const filename = `crunchbase-scrape-results-${todayKey()}.json`;
+  const uploadedDate = todayKey();
+  const filename = `crunchbase-scrape-results-${dateKey}-${uploadedDate}.json`;
 
   let downloadOk = false;
   try {
@@ -138,7 +139,9 @@ export async function exportMergedJsonFromDateChunks(
   let uploadOk = false;
   try {
     const fd = new FormData();
-    fd.append("date", dateKey);
+    // Store this file under "today" while preserving the scraped date in the filename.
+    fd.append("date", uploadedDate);
+    if (meta.groupId) fd.append("group_id", meta.groupId);
     fd.append(
       "file",
       new Blob([jsonText], { type: "application/json" }),

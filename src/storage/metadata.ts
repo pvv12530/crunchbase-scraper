@@ -43,13 +43,18 @@ export async function ensureRun(dateKey: string, sourceId: SourceId): Promise<Da
   return meta;
 }
 
-export async function clearRunChunks(dateKey: string, sourceId: SourceId): Promise<DateRunMeta> {
+export async function clearRunChunks(
+  dateKey: string,
+  sourceId: SourceId,
+  opts?: { groupId?: string },
+): Promise<DateRunMeta> {
   const meta = await ensureRun(dateKey, sourceId);
   const cleared: DateRunMeta = {
     ...meta,
     chunks: [],
     rowCount: 0,
     status: 'running',
+    groupId: opts?.groupId ?? meta.groupId,
     errorMessage: undefined,
     updatedAt: new Date().toISOString(),
   };

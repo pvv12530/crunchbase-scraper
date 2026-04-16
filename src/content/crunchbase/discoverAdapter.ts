@@ -1,4 +1,29 @@
 import type { ChunkRecord } from "@shared/models";
+import {
+  clickElement,
+  clickRadioByLabel,
+  findButtonLikeByText,
+  findOpenMenuPanel,
+  getByTagName,
+  getScrollParent,
+  isElementDisplayed,
+  normalizeText,
+  setInputValue,
+  sleep,
+  waitForCheckboxChecked,
+  waitForElement,
+} from "./discoverDomUtils";
+import {
+  extractAnyImageIdFromElement,
+  extractCellPlainText,
+  extractCrunchbaseImageId,
+  normalizeRangeValue,
+  normalizeRevenueRangeEnum,
+  parseCrunchbaseOrgPermalinkFromHref,
+  parseEntityIdentifiersFromCell,
+  parseMoneyValue,
+  type MoneyValue,
+} from "./discoverParsers";
 
 const SOURCE_CRUNCHBASE_DISCOVER_ORGS = "crunchbase-discover-orgs" as const;
 const DISCOVER_ORGS_PATH = "/discover/organization.companies";
@@ -64,78 +89,6 @@ const SELECTORS = {
   ],
 };
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function normalizeText(s: string): string {
-  return s.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function getScrollParent(el: Element | null): HTMLElement | null {
-  let cur: Element | null = el;
-  for (let i = 0; i < 12 && cur; i++) {
-    if (cur instanceof HTMLElement) {
-      const style = window.getComputedStyle(cur);
-      const overflowY = style.overflowY;
-      const canScroll =
-        (overflowY === "auto" || overflowY === "scroll") &&
-        cur.scrollHeight > cur.clientHeight + 4;
-      if (canScroll) return cur;
-    }
-    cur = cur.parentElement;
-  }
-  return null;
-}
-
-function getByTagName<T extends Element>(root: ParentNode, tag: string): T[] {
-  return Array.from(root.querySelectorAll(tag)) as T[];
-}
-
-function isElementDisplayed(el: Element | null): el is HTMLElement {
-  if (!(el instanceof HTMLElement)) return false;
-  const style = window.getComputedStyle(el);
-  if (style.display === "none") return false;
-  if (style.visibility === "hidden") return false;
-  if (style.opacity === "0") return false;
-  const rect = el.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
-}
-
-function findOpenMenuPanel(): HTMLElement | null {
-  const selector = SELECTORS.menuPanel.join(",");
-  const candidates = Array.from(document.querySelectorAll(selector));
-  for (const c of candidates) {
-    if (isElementDisplayed(c)) return c;
-  }
-  return null;
-}
-
-async function waitForElement(
-  selector: string,
-  opts: {
-    timeoutMs: number;
-    pollMs?: number;
-    root?: ParentNode;
-    signal?: AbortSignal;
-  },
-): Promise<Element> {
-  const pollMs = opts.pollMs ?? 120;
-  const root = opts.root ?? document;
-  const started = Date.now();
-  while (Date.now() - started < opts.timeoutMs) {
-    if (opts.signal?.aborted) {
-      const err = new Error("Cancelled by user");
-      err.name = "AbortError";
-      throw err;
-    }
-    const el = root.querySelector(selector);
-    if (el) return el;
-    await sleep(pollMs);
-  }
-  throw new Error(`Timed out waiting for ${selector}`);
-}
-
 function findAdvancedFilterByHeader(
   overlay: ParentNode,
   headerText: string,
@@ -148,96 +101,6 @@ function findAdvancedFilterByHeader(
     if (normalizeText(h4.textContent ?? "") === want) return af;
   }
   return null;
-}
-
-function clickRadioByLabel(root: ParentNode, labelText: string): boolean {
-  const want = normalizeText(labelText);
-  const labels = Array.from(root.querySelectorAll("label"));
-  for (const l of labels) {
-    if (!(l instanceof HTMLLabelElement)) continue;
-    if (normalizeText(l.textContent ?? "") !== want) continue;
-    const forId = l.getAttribute("for");
-    if (forId) {
-      const input = root.querySelector(`#${CSS.escape(forId)}`);
-      if (input instanceof HTMLInputElement) {
-        input.click();
-        return true;
-      }
-    }
-    const radio = l.querySelector('input[type="radio"]');
-    if (radio instanceof HTMLInputElement) {
-      radio.click();
-      return true;
-    }
-    const btn = l.closest("mat-radio-button");
-    if (btn instanceof HTMLElement) {
-      btn.click();
-      return true;
-    }
-  }
-  return false;
-}
-
-function setInputValue(
-  el: HTMLInputElement,
-  value: string,
-  opts?: { blur?: boolean },
-): void {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const proto = (el as any).__proto__ as { value?: unknown } | undefined;
-    const desc = proto
-      ? Object.getOwnPropertyDescriptor(proto, "value")
-      : undefined;
-    if (desc?.set) desc.set.call(el, value);
-    else el.value = value;
-  } catch {
-    el.value = value;
-  }
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
-  if (opts?.blur ?? true)
-    el.dispatchEvent(new Event("blur", { bubbles: true }));
-}
-
-function clickElement(el: Element): void {
-  if (el instanceof HTMLElement) {
-    el.click();
-    return;
-  }
-  (el as unknown as { click?: () => void }).click?.();
-}
-
-function findButtonLikeByText(
-  root: ParentNode,
-  text: string,
-): HTMLElement | null {
-  const want = normalizeText(text);
-  const els = Array.from(root.querySelectorAll("button,[role='menuitem']"));
-  for (const el of els) {
-    if (!(el instanceof HTMLElement)) continue;
-    const t = normalizeText(el.textContent ?? "");
-    if (!t) continue;
-    if (t === want || t.includes(want)) return el;
-  }
-  return null;
-}
-
-async function waitForCheckboxChecked(
-  input: HTMLInputElement,
-  opts: { timeoutMs: number; signal?: AbortSignal },
-): Promise<boolean> {
-  const started = Date.now();
-  while (Date.now() - started < opts.timeoutMs) {
-    if (opts.signal?.aborted) {
-      const err = new Error("Cancelled by user");
-      err.name = "AbortError";
-      throw err;
-    }
-    if (input.checked) return true;
-    await sleep(50);
-  }
-  return input.checked;
 }
 
 async function configureResultsTableView(
@@ -264,7 +127,7 @@ async function configureResultsTableView(
 
   // Don't blindly click Settings; it toggles the menu open/closed.
   // If the menu is already open, avoid clicking (which would close it).
-  let menu = findOpenMenuPanel();
+  let menu = findOpenMenuPanel(SELECTORS.menuPanel);
   if (!menu) {
     clickElement(settings);
     await log('Clicked results header "Settings"');
@@ -274,7 +137,9 @@ async function configureResultsTableView(
       timeoutMs: 8000,
       signal,
     });
-    menu = isElementDisplayed(maybeMenu) ? maybeMenu : findOpenMenuPanel();
+    menu = isElementDisplayed(maybeMenu)
+      ? maybeMenu
+      : findOpenMenuPanel(SELECTORS.menuPanel);
   } else {
     await log('Settings menu already open; not clicking "Settings" again.');
   }
@@ -574,7 +439,8 @@ function hasNoResults(): boolean {
 }
 
 async function applyFinancialsValuationDateFilter(
-  dateKey: string,
+  startDate: string,
+  endDate: string,
   log: (t: string) => void | Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -625,12 +491,12 @@ async function applyFinancialsValuationDateFilter(
   }
 
   await log("Input start date…");
-  setInputValue(start, dateKey);
+  setInputValue(start, startDate);
   await sleep(DELAYS.afterSetDatesMs);
   await log("Input end date…");
-  setInputValue(end, dateKey);
+  setInputValue(end, endDate);
   await sleep(DELAYS.afterSetDatesMs);
-  await log(`Last Funding Date: set custom range to ${dateKey} → ${dateKey}`);
+  await log(`Last Funding Date: set custom range to ${startDate} → ${endDate}`);
 }
 
 function clickFilterGroupButtonByLabel(label: string): boolean {
@@ -766,10 +632,6 @@ function findResultsGridRoot(): Element | null {
   );
 }
 
-function extractCellPlainText(cell: Element): string {
-  return (cell.textContent ?? "").replace(/\s+/g, " ").trim();
-}
-
 function scrapeResultsGridHeaderColumnIds(root: ParentNode): string[] {
   const headerRow = root.querySelector("grid-header-row");
   if (!headerRow) return [];
@@ -785,184 +647,6 @@ type DiscoverIdentifier = { permalink: string; image_id: string };
 type DiscoverRow = Record<string, unknown> & {
   identifier?: DiscoverIdentifier;
 };
-
-function extractCrunchbaseImageId(url: string): string {
-  const s = (url ?? "").trim();
-  if (!s) return "";
-  // Common patterns:
-  // - https://images.crunchbase.com/image/upload/.../<image_id>?...
-  // - https://.../image/upload/<transforms>/<image_id>
-  // - Any URL whose last path segment is the id
-  try {
-    const u = new URL(s, window.location.origin);
-    const parts = u.pathname.split("/").filter(Boolean);
-    const last = parts[parts.length - 1] ?? "";
-    const mLast32 = last.match(/^([a-f0-9]{32})$/i);
-    if (mLast32?.[1]) return mLast32[1];
-    // Sometimes the last segment is the id with extra suffixes; grab 32-hex inside it.
-    const mInner32 = last.match(/([a-f0-9]{32})/i);
-    if (mInner32?.[1]) return mInner32[1];
-  } catch {
-    // ignore
-  }
-  const m = s.match(/([a-f0-9]{32})/i);
-  return m?.[1] ?? "";
-}
-
-function extractAnyImageIdFromElement(el: Element): string {
-  const imgs = Array.from(el.querySelectorAll("img[src]")).filter(
-    (i): i is HTMLImageElement => i instanceof HTMLImageElement,
-  );
-  for (const img of imgs) {
-    const id = extractCrunchbaseImageId(img.src);
-    if (id) return id;
-  }
-  // Fallback: background-image URLs.
-  const styled = Array.from(el.querySelectorAll("*")).filter(
-    (n): n is HTMLElement => n instanceof HTMLElement,
-  );
-  for (const n of styled) {
-    const bg = n.style?.backgroundImage ?? "";
-    const m = bg.match(/url\(["']?([^"')]+)["']?\)/i);
-    const url = m?.[1] ?? "";
-    if (!url) continue;
-    const id = extractCrunchbaseImageId(url);
-    if (id) return id;
-  }
-  return "";
-}
-
-function parseCrunchbaseOrgPermalinkFromHref(href: string): string | null {
-  try {
-    const u = new URL(href, window.location.origin);
-    const path = u.pathname.replace(/\/+$/, "");
-    // Typical patterns:
-    // - /organization/<slug>
-    // - /organization/<slug>/company_financials
-    const m = path.match(/\/organization\/([^/]+)/i);
-    if (m?.[1]) return decodeURIComponent(m[1]);
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-type MoneyValue = { value_usd: number | null; currency: string; value: number };
-
-function parseMoneyValue(raw: string): MoneyValue | null {
-  const s = raw.trim();
-  if (!s) return null;
-
-  // Common currency symbols and codes.
-  // Note: without FX data, we only set value_usd when currency is USD.
-  const currencyBySymbol: Record<string, string> = {
-    $: "USD",
-    "€": "EUR",
-    "£": "GBP",
-    "¥": "JPY",
-    "₩": "KRW",
-    "₹": "INR",
-  };
-
-  let currency: string | null = null;
-  let rest = s;
-
-  const symbol = s[0];
-  if (currencyBySymbol[symbol]) {
-    currency = currencyBySymbol[symbol];
-    rest = s.slice(1).trim();
-  } else {
-    const codeMatch = s.match(/^(USD|EUR|GBP|JPY|CNY|CAD|AUD|INR|KRW)\b/i);
-    if (codeMatch) {
-      currency = codeMatch[1].toUpperCase();
-      rest = s.slice(codeMatch[0].length).trim();
-    }
-  }
-
-  if (!currency) return null;
-
-  // Parse number with optional magnitude suffix.
-  // Accept: 2,500,000 | 2.5M | 2.5m | 250k | 1.2B
-  const magMatch = rest.match(/^([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMB])?$/i);
-  if (!magMatch) return null;
-  const num = Number(magMatch[1].replace(/,/g, ""));
-  if (!Number.isFinite(num)) return null;
-  const mag = (magMatch[2] ?? "").toUpperCase();
-  const mult = mag === "K" ? 1e3 : mag === "M" ? 1e6 : mag === "B" ? 1e9 : 1;
-  const value = Math.round(num * mult);
-  const value_usd = currency === "USD" ? value : null;
-  return { value_usd, currency, value };
-}
-
-type EntityIdentifier = {
-  permalink: string;
-  image_id: string;
-  uuid: string;
-  entity_def_id: "organization" | "person" | string;
-  value: string;
-};
-
-function parseEntityIdentifiersFromCell(cell: Element): EntityIdentifier[] {
-  const anchors = Array.from(cell.querySelectorAll("a[href]")).filter(
-    (a): a is HTMLAnchorElement => a instanceof HTMLAnchorElement,
-  );
-  const out: EntityIdentifier[] = [];
-  for (const a of anchors) {
-    const href = a.getAttribute("href") ?? "";
-    if (!href) continue;
-
-    let permalink = "";
-    let entity_def_id: string = "";
-    try {
-      const u = new URL(href, window.location.origin);
-      const path = u.pathname.replace(/\/+$/, "");
-      const mOrg = path.match(/\/organization\/([^/]+)/i);
-      const mPerson = path.match(/\/person\/([^/]+)/i);
-      if (mOrg?.[1]) {
-        permalink = decodeURIComponent(mOrg[1]);
-        entity_def_id = "organization";
-      } else if (mPerson?.[1]) {
-        permalink = decodeURIComponent(mPerson[1]);
-        entity_def_id = "person";
-      } else {
-        const seg = path.split("/").filter(Boolean).pop();
-        if (seg) permalink = decodeURIComponent(seg);
-      }
-    } catch {
-      // ignore
-    }
-
-    const value = (a.getAttribute("title") ?? a.textContent ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!value) continue;
-
-    const img = a.querySelector("img[src]") as HTMLImageElement | null;
-    const image_id = extractCrunchbaseImageId(img?.src ?? "");
-
-    const uuid =
-      a.getAttribute("data-uuid") ??
-      a.closest("[data-uuid]")?.getAttribute("data-uuid") ??
-      "";
-
-    out.push({ permalink, image_id, uuid, entity_def_id, value });
-  }
-
-  const seen = new Set<string>();
-  return out.filter((e) => {
-    const k = `${e.entity_def_id}::${e.permalink}::${e.value}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-}
-
-function normalizeRevenueRangeEnum(raw: string): string | null {
-  const s = raw.trim();
-  if (!s) return null;
-  if (/^less than\s*\$?1m$/i.test(s)) return "r_00010000";
-  return null;
-}
 
 type FxRates = {
   base: "USD";
@@ -1057,17 +741,6 @@ async function enrichUsdValuesInRows(
       }
     }
   }
-}
-
-function normalizeRangeValue(raw: string): string | null {
-  const s = raw.trim();
-  const m = s.match(/^(\d{1,6})\s*-\s*(\d{1,6})$/);
-  if (!m) return null;
-  const a = Number(m[1]);
-  const b = Number(m[2]);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  const pad = (n: number) => String(Math.trunc(n)).padStart(5, "0");
-  return `c_${pad(a)}_${pad(b)}`;
 }
 
 function scrapeResultsGridRowsFromDom(root: ParentNode): DiscoverRow[] {
@@ -1249,33 +922,34 @@ function discoverRowDedupeKey(row: DiscoverRow): string {
   return JSON.stringify(row);
 }
 
+type DateRangeRun = {
+  runKey: string;
+  startDate: string;
+  endDate: string;
+};
+
+function buildPerDateRuns(dateKeyOrKeys: string | string[]): DateRangeRun[] {
+  const keys = Array.isArray(dateKeyOrKeys) ? dateKeyOrKeys : [dateKeyOrKeys];
+  const cleaned = keys.map((s) => (s ?? "").trim()).filter((s) => s.length > 0);
+  const uniq = Array.from(new Set(cleaned)).sort(); // ISO YYYY-MM-DD sorts lexicographically
+  if (uniq.length === 0) throw new Error("No dates provided");
+  return uniq.map((d) => ({ runKey: d, startDate: d, endDate: d }));
+}
+
 export async function runDiscoverScrape(
-  dateKey: string,
+  dateKeyOrKeys: string | string[],
   emitChunk: (record: ChunkRecord) => Promise<void>,
   log: (t: string) => void | Promise<void>,
   signal?: AbortSignal,
+  opts?: {
+    onDateComplete?: (
+      dateKey: string,
+      totalRowsForDate: number,
+    ) => void | Promise<void>;
+  },
 ): Promise<number> {
   assertDiscoverOrgPage();
-  applyDateHint(dateKey);
-
-  const clickedFinancials = clickFilterGroupButtonByLabel("Financials");
-  if (clickedFinancials) {
-    await log('Clicked "Financials" button');
-    await sleep(DELAYS.afterFinancialsClickMs);
-    await log("Selected filter group: Financials");
-    try {
-      await applyFinancialsValuationDateFilter(dateKey, log, signal);
-    } catch (e) {
-      await log(
-        `Financials overlay automation failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  } else {
-    await log("Could not find Financials filter-group button (continuing).");
-  }
-
-  await log("Waiting 10s for results to reload after date change…");
-  await sleep(DELAYS.afterDatesResultsLoadMs);
+  const ranges = buildPerDateRuns(dateKeyOrKeys);
 
   // Configure table columns in the results view (optional but recommended).
   // NOTE: Put your desired column labels here (exact strings you would type into the "Find a filter..." box).
@@ -1346,115 +1020,162 @@ export async function runDiscoverScrape(
     "Company Tech Stack by G2 Stack",
     "private data",
   ];
-  try {
-    await configureResultsTableView(
-      TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
-      log,
-      signal,
-    );
-  } catch (e) {
-    await log(
-      `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-
-  await log("Waiting for results table…");
-  try {
-    await waitForResultsRoot(20_000, signal);
-    await log("Results visible. Starting scrape…");
-  } catch {
-    await log("Results table not detected yet (continuing).");
-  }
-
+  let didConfigureView = false;
   let totalRows = 0;
-  const maxPages = 500;
 
-  await rewindResultsToFirstPage(log, signal, maxPages);
-
-  // Scrape from DOM (no network JSON capture).
-  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+  for (const r of ranges) {
+    let totalRowsForDate = 0;
     if (signal?.aborted) {
       const err = new Error("Cancelled by user");
       err.name = "AbortError";
       throw err;
     }
 
-    await sleep(
-      pageIndex === 0
-        ? DELAYS.initialResultsSettleMs
-        : DELAYS.betweenPagesSettleMs,
-    );
+    await log(`Applying date range ${r.startDate} → ${r.endDate}…`);
+    applyDateHint(r.runKey);
 
-    if (hasNoResults()) {
-      await log("No results found for current filters.");
+    const clickedFinancials = clickFilterGroupButtonByLabel("Financials");
+    if (clickedFinancials) {
+      await log('Clicked "Financials" button');
+      await sleep(DELAYS.afterFinancialsClickMs);
+      await log("Selected filter group: Financials");
+      try {
+        await applyFinancialsValuationDateFilter(
+          r.startDate,
+          r.endDate,
+          log,
+          signal,
+        );
+      } catch (e) {
+        await log(
+          `Financials overlay automation failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    } else {
+      await log("Could not find Financials filter-group button (continuing).");
+    }
+
+    await log("Waiting 10s for results to reload after date change…");
+    await sleep(DELAYS.afterDatesResultsLoadMs);
+
+    if (!didConfigureView) {
+      try {
+        await configureResultsTableView(
+          TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
+          log,
+          signal,
+        );
+        didConfigureView = true;
+      } catch (e) {
+        await log(
+          `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+
+    await log("Waiting for results table…");
+    try {
+      await waitForResultsRoot(20_000, signal);
+      await log("Results visible. Starting scrape…");
+    } catch {
+      await log("Results table not detected yet (continuing).");
+    }
+
+    const maxPages = 500;
+    await rewindResultsToFirstPage(log, signal, maxPages);
+
+    // Scrape from DOM (no network JSON capture).
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+      if (signal?.aborted) {
+        const err = new Error("Cancelled by user");
+        err.name = "AbortError";
+        throw err;
+      }
+
+      await sleep(
+        pageIndex === 0
+          ? DELAYS.initialResultsSettleMs
+          : DELAYS.betweenPagesSettleMs,
+      );
+
+      if (hasNoResults()) {
+        await log("No results found for current filters.");
+        const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
+        const record: ChunkRecord = {
+          dateKey: r.runKey,
+          sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
+          chunkId,
+          pageIndex: pageIndex + 1,
+          rowCount: 0,
+          capturedAt: new Date().toISOString(),
+          payload: {
+            mode: "dom-grid",
+            runKey: r.runKey,
+            startDate: r.startDate,
+            endDate: r.endDate,
+            pageIndex: pageIndex + 1,
+            capturedUrl: window.location.href,
+            columns: [],
+            gridRows: [],
+            note: "no_results_found",
+          },
+        };
+        await emitChunk(record);
+        break;
+      }
+
+      const gridRoot = findResultsGridRoot();
+      const headerIds = gridRoot
+        ? scrapeResultsGridHeaderColumnIds(gridRoot)
+        : [];
+      const pageRows = gridRoot ? scrapeResultsGridRowsFromDom(gridRoot) : [];
+      await enrichUsdValuesInRows(pageRows, log, signal);
+
+      totalRows += pageRows.length;
+      totalRowsForDate += pageRows.length;
+
       const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
       const record: ChunkRecord = {
-        dateKey,
+        dateKey: r.runKey,
         sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
         chunkId,
         pageIndex: pageIndex + 1,
-        rowCount: 0,
+        rowCount: pageRows.length,
         capturedAt: new Date().toISOString(),
         payload: {
           mode: "dom-grid",
-          dateKey,
+          runKey: r.runKey,
+          startDate: r.startDate,
+          endDate: r.endDate,
           pageIndex: pageIndex + 1,
           capturedUrl: window.location.href,
-          columns: [],
-          gridRows: [],
-          note: "no_results_found",
+          columns: headerIds,
+          gridRows: pageRows,
         },
       };
       await emitChunk(record);
-      break;
+      await log(`Saved ${chunkId} (rows=${pageRows.length})`);
+
+      const next = findNextButton();
+      if (!next) {
+        await log("No Next control found — stopping pagination.");
+        break;
+      }
+      if (isNextControlDisabled(next)) {
+        await log("Next disabled — last page.");
+        break;
+      }
+
+      await log("Waiting 60s before clicking Next…");
+      await sleep(DELAYS.beforeNextClickMs);
+      next.click();
+      await log('Clicked "Next"');
+      await sleep(DELAYS.afterNextClickMs);
+      await log("Waiting 20s for next page results…");
+      await sleep(DELAYS.afterApplyFiltersWaitMs);
     }
 
-    const gridRoot = findResultsGridRoot();
-    const headerIds = gridRoot
-      ? scrapeResultsGridHeaderColumnIds(gridRoot)
-      : [];
-    const pageRows = gridRoot ? scrapeResultsGridRowsFromDom(gridRoot) : [];
-    await enrichUsdValuesInRows(pageRows, log, signal);
-
-    totalRows += pageRows.length;
-
-    const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
-    const record: ChunkRecord = {
-      dateKey,
-      sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
-      chunkId,
-      pageIndex: pageIndex + 1,
-      rowCount: pageRows.length,
-      capturedAt: new Date().toISOString(),
-      payload: {
-        mode: "dom-grid",
-        dateKey,
-        pageIndex: pageIndex + 1,
-        capturedUrl: window.location.href,
-        columns: headerIds,
-        gridRows: pageRows,
-      },
-    };
-    await emitChunk(record);
-    await log(`Saved ${chunkId} (rows=${pageRows.length})`);
-
-    const next = findNextButton();
-    if (!next) {
-      await log("No Next control found — stopping pagination.");
-      break;
-    }
-    if (isNextControlDisabled(next)) {
-      await log("Next disabled — last page.");
-      break;
-    }
-
-    await log("Waiting 60s before clicking Next…");
-    await sleep(DELAYS.beforeNextClickMs);
-    next.click();
-    await log('Clicked "Next"');
-    await sleep(DELAYS.afterNextClickMs);
-    await log("Waiting 20s for next page results…");
-    await sleep(DELAYS.afterApplyFiltersWaitMs);
+    await opts?.onDateComplete?.(r.runKey, totalRowsForDate);
   }
 
   return totalRows;

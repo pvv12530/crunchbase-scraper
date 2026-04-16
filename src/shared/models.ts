@@ -15,6 +15,8 @@ export interface DateRunMeta {
   sourceId: SourceId;
   status: RunStatus;
   rowCount: number;
+  /** Shared ID across a multi-date calendar selection. */
+  groupId?: string;
   errorMessage?: string;
   chunks: ChunkRef[];
   updatedAt: string;

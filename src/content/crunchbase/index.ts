@@ -64,12 +64,16 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
   }
 
   void (async () => {
-    const { dateKey } = message;
+    const dateKeys =
+      Array.isArray(message.dateKeys) && message.dateKeys.length > 0
+        ? message.dateKeys
+        : [message.dateKey];
+    const dateKey = message.dateKey;
     const ac = new AbortController();
     abortCurrent = () => ac.abort();
     try {
       const totalRows = await runDiscoverScrape(
-        dateKey,
+        dateKeys,
         async (record) => {
           await chrome.runtime.sendMessage({
             type: 'content/chunk',
@@ -87,14 +91,28 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
           } satisfies ExtensionMessage);
         },
         ac.signal,
+        {
+          onDateComplete: async (dk, rows) => {
+            await chrome.runtime.sendMessage({
+              type: 'content/done',
+              tabId: -1,
+              dateKey: dk,
+              totalRows: rows,
+            } satisfies ExtensionMessage);
+          },
+        },
       );
 
-      await chrome.runtime.sendMessage({
-        type: 'content/done',
-        tabId: -1,
-        dateKey,
-        totalRows,
-      } satisfies ExtensionMessage);
+      // For multi-date runs we emit content/done per date (above).
+      // Keep the single-date behavior for backwards-compat.
+      if (dateKeys.length === 1) {
+        await chrome.runtime.sendMessage({
+          type: 'content/done',
+          tabId: -1,
+          dateKey,
+          totalRows,
+        } satisfies ExtensionMessage);
+      }
       sendResponse({ ok: true });
     } catch (e) {
       const errText = e instanceof Error ? e.message : String(e);

@@ -9,7 +9,13 @@ export type ExtensionMessage =
   | { type: 'runs/listResponse'; runs: DateRunMeta[] }
   | { type: 'supabase/getJsonByDate'; date: string }
   | { type: 'supabase/uploadJson'; date: string; filename: string; jsonText: string }
-  | { type: 'scrape/start'; dateKey: string; sourceId: SourceId }
+  | {
+      type: 'scrape/start';
+      dateKey: string;
+      dateKeys?: string[];
+      groupId?: string;
+      sourceId: SourceId;
+    }
   | { type: 'scrape/resultsStart'; runKey: string }
   | { type: 'scrape/stop' }
   | { type: 'scrape/queueClear' }
