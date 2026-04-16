@@ -1,19 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Loader2, Play, Square, Trash2, Upload } from "lucide-react";
+import { Download, Loader2, Play, Trash2, Upload } from "lucide-react";
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
-import type { DateRunMeta, ScrapeQueueState } from "@shared/models";
+import type { ScrapeQueueState } from "@shared/models";
 import { triggerDownload } from "./export/download";
 import { Calendar } from "./components/Calendar";
 
 const SUPABASE_JSON_PUBLIC_BASE =
   "https://gfxknuxbtkhomfodrrfr.supabase.co/storage/v1/object/public/json-files/";
-
-function todayKey(): string {
-  const t = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
-}
 
 function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
@@ -100,23 +94,6 @@ async function savePersistedLogsByDate(next: LogsByDate): Promise<void> {
   }
 }
 
-/** Browser download of the current-results snapshot (runs in parallel with UI updates). */
-function downloadScrapeResultsJsonFile(payload: {
-  runKey: string;
-  columns: string[];
-  rows: Record<string, unknown>[];
-  totalRows: number;
-}): void {
-  const body = {
-    entities: payload.rows,
-    count: payload.totalRows,
-  };
-  const blob = new Blob([JSON.stringify(body, null, 2)], {
-    type: "application/json",
-  });
-  triggerDownload(blob, `crunchbase-scrape-results-${payload.runKey}.json`);
-}
-
 type SupabaseJsonFile = {
   id: string;
   file_date: string;
@@ -142,28 +119,7 @@ async function fetchJsonFilesByDate(date: string): Promise<SupabaseJsonFile[]> {
   return Array.isArray(res.files) ? res.files : [];
 }
 
-async function uploadJsonToSupabase(payload: {
-  date: string;
-  filename: string;
-  jsonText: string;
-}): Promise<void> {
-  const res = (await chrome.runtime.sendMessage({
-    type: "supabase/uploadJson",
-    date: payload.date,
-    filename: payload.filename,
-    jsonText: payload.jsonText,
-  } satisfies ExtensionMessage)) as { ok: true } | { ok: false; error: string };
-  if (!res || typeof res !== "object" || res.ok !== true) {
-    throw new Error(
-      res && typeof res === "object" && "error" in res
-        ? String((res as { error: unknown }).error)
-        : "uploadJson failed",
-    );
-  }
-}
-
 export function App(): JSX.Element {
-  const [runs, setRuns] = useState<DateRunMeta[]>([]);
   const [selectedDateKey, setSelectedDateKey] = useState<string>("");
   const [selectedDateKeys, setSelectedDateKeys] = useState<string[]>([]);
   const rangeAnchorRef = useRef<string>("");
@@ -241,13 +197,6 @@ export function App(): JSX.Element {
     }
   }, []);
 
-  const loadRuns = useCallback(async () => {
-    const list = await chrome.runtime.sendMessage({
-      type: "runs/list",
-    } satisfies ExtensionMessage);
-    setRuns(Array.isArray(list) ? (list as DateRunMeta[]) : []);
-  }, []);
-
   const loadQueueState = useCallback(async () => {
     const q = await chrome.runtime.sendMessage({
       type: "scrape/queueGet",
@@ -258,11 +207,6 @@ export function App(): JSX.Element {
       setQueueState(null);
     }
   }, []);
-
-  const runForDate = useCallback(
-    (key: string) => runs.find((r) => r.dateKey === key),
-    [runs],
-  );
 
   const refreshTabContext = useCallback(async () => {
     const ctx = await chrome.runtime.sendMessage({
@@ -278,10 +222,9 @@ export function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    void loadRuns();
     void loadQueueState();
     void refreshTabContext();
-  }, [loadRuns, loadQueueState, refreshTabContext]);
+  }, [loadQueueState, refreshTabContext]);
 
   useEffect(() => {
     const prev = prevModeTab.current;
@@ -326,104 +269,6 @@ export function App(): JSX.Element {
     };
   }, [logsByDate]);
 
-  const runScrapeResults = useCallback(
-    async (opts?: { runKey?: string }) => {
-      const runKey =
-        opts?.runKey && isDateKey(opts.runKey)
-          ? opts.runKey
-          : isDateKey(selectedDateKey)
-            ? selectedDateKey
-            : todayKey();
-      if (!isDateKey(selectedDateKey)) setSelectedDateKey(runKey);
-      const startLog = 'Clicked "Scrape results"';
-      setLogsByDate((prev) => {
-        const cur = prev[runKey] ?? [];
-        const next = [
-          ...cur,
-          {
-            at: new Date().toISOString(),
-            level: "info" as const,
-            text: startLog,
-          },
-        ].slice(-LOGS_MAX_PER_DATE);
-        return { ...prev, [runKey]: next };
-      });
-      const res = (await chrome.runtime.sendMessage({
-        type: "scrape/resultsStart",
-        runKey,
-      } satisfies ExtensionMessage)) as {
-        ok?: boolean;
-        error?: string;
-        totalRows?: number;
-        columns?: string[];
-        rows?: Record<string, unknown>[];
-      };
-      if (res && typeof res === "object" && res.ok === false && res.error) {
-        setLogsByDate((prev) => {
-          const cur = prev[runKey] ?? [];
-          const next = [
-            ...cur,
-            {
-              at: new Date().toISOString(),
-              level: "error" as const,
-              text: res.error ?? "Scrape results failed",
-            },
-          ].slice(-LOGS_MAX_PER_DATE);
-          return { ...prev, [runKey]: next };
-        });
-        return;
-      }
-      const columns = Array.isArray(res?.columns) ? res.columns : [];
-      const rows = Array.isArray(res?.rows) ? res.rows : [];
-      const totalRows =
-        typeof res?.totalRows === "number" ? res.totalRows : rows.length;
-      const snapshot = { runKey, columns, rows, totalRows };
-      void queueMicrotask(() =>
-        downloadScrapeResultsJsonFile({ ...snapshot, runKey }),
-      );
-      void queueMicrotask(async () => {
-        try {
-          const body = { entities: rows, count: totalRows };
-          const jsonText = JSON.stringify(body, null, 2);
-          const filename = `crunchbase-scrape-results-${runKey}.json`;
-          await uploadJsonToSupabase({
-            date: runKey,
-            filename,
-            jsonText,
-          });
-          const files = await fetchJsonFilesByDate(runKey);
-          setRemoteJsonFiles(files);
-        } catch (e) {
-          setLogsByDate((prev) => {
-            const cur = prev[runKey] ?? [];
-            const next = [
-              ...cur,
-              {
-                at: new Date().toISOString(),
-                level: "warn" as const,
-                text: `Upload failed: ${e instanceof Error ? e.message : String(e)}`,
-              },
-            ].slice(-LOGS_MAX_PER_DATE);
-            return { ...prev, [runKey]: next };
-          });
-        }
-      });
-      setLogsByDate((prev) => {
-        const cur = prev[runKey] ?? [];
-        const next = [
-          ...cur,
-          {
-            at: new Date().toISOString(),
-            level: "info" as const,
-            text: `Saved JSON download: crunchbase-scrape-results-${runKey}.json`,
-          },
-        ].slice(-LOGS_MAX_PER_DATE);
-        return { ...prev, [runKey]: next };
-      });
-    },
-    [selectedDateKey],
-  );
-
   useEffect(() => {
     const onMsg = (msg: ExtensionMessage) => {
       if (msg.type === "tabContext/changed") {
@@ -435,7 +280,6 @@ export function App(): JSX.Element {
         msg.type === "scrape/error" ||
         msg.type === "scrape/queueChanged"
       ) {
-        void loadRuns();
         void loadQueueState();
       }
       if (msg.type === "scrape/log") {
@@ -469,7 +313,7 @@ export function App(): JSX.Element {
     };
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
-  }, [loadRuns, loadQueueState, refreshTabContext]);
+  }, [loadQueueState, refreshTabContext]);
 
   useEffect(() => {
     if (!isDateKey(selectedDateKey)) {
@@ -563,30 +407,6 @@ export function App(): JSX.Element {
     });
   };
 
-  const onRetryRow = async (dateKey: string) => {
-    await chrome.runtime.sendMessage({
-      type: "scrape/retryDate",
-      dateKey,
-      sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
-    } satisfies ExtensionMessage);
-    void loadQueueState();
-  };
-
-  const onStop = async () => {
-    await chrome.runtime.sendMessage({
-      type: "scrape/stop",
-    } satisfies ExtensionMessage);
-    void loadQueueState();
-  };
-
-  const onClearQueue = async () => {
-    await chrome.runtime.sendMessage({
-      type: "scrape/queueClear",
-    } satisfies ExtensionMessage);
-    setImportedDateOrder([]);
-    void loadQueueState();
-  };
-
   const applyCsvText = useCallback(
     async (text: string) => {
       const res = (await chrome.runtime.sendMessage({
@@ -605,10 +425,9 @@ export function App(): JSX.Element {
       }
       setSelectedDateKeys(dates);
       setModeTab("csv");
-      void loadRuns();
       void loadQueueState();
     },
-    [loadRuns, loadQueueState],
+    [loadQueueState],
   );
 
   const onCsvInputChange = async (ev: React.ChangeEvent<HTMLInputElement>) => {
@@ -634,23 +453,12 @@ export function App(): JSX.Element {
   const isCb = tabCtx.ok;
   const hasValidSelectedDate = isDateKey(selectedDateKey);
   const scrapeDisabled = !isCb || !hasValidSelectedDate;
-  const hasActiveJob = queueState?.activeDateKey != null;
-  const hasPending = (queueState?.pending.length ?? 0) > 0;
-  const queueBusy = hasActiveJob || hasPending;
   const selectedQueued = hasValidSelectedDate
     ? (queueState?.pending ?? []).includes(selectedDateKey)
     : false;
   const selectedRunning =
     hasValidSelectedDate && queueState?.activeDateKey === selectedDateKey;
   const selectedScrapeBusy = selectedQueued || selectedRunning;
-
-  /** Prefer local import list so a new upload shows all dates immediately; use persisted batchOrder after reload. */
-  const dateRows =
-    importedDateOrder.length > 0
-      ? importedDateOrder
-      : queueState?.batchOrder && queueState.batchOrder.length > 0
-        ? queueState.batchOrder
-        : [];
 
   const selectedLogs = logsByDate[selectedDateKey] ?? [];
 

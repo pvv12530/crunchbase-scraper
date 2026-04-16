@@ -717,52 +717,6 @@ export async function runDiscoverScrape(
   ensureSearchResultsNetworkInterceptorInstalled();
   ensureSearchResultsListenerInstalled();
 
-  // Configure table columns in the results view (optional but recommended).
-  // NOTE: Put your desired column labels here (exact strings you would type into the "Find a filter..." box).
-  // const TABLE_VIEW_COLUMNS: string[] = [
-  //   "Headquarters Regions", // location_group_identifiers
-  //   "Headquarters Location", // location_group_identifiers_text
-  //   "Operating Status",
-  //   "linkedin", // linkedin
-  //   "semrush monthly visits Growth", // semrush_visits_mom_pct
-  //   "semrush average visits (6 months)", // semrush_visits_latest_6_months_avg
-  //   "number of investors", // num_investors
-  //   "semrush visit duration", //semrush_visit_duration
-  //   "last funding date", //last_funding_at
-  //   "last equity funding amount", //last_equity_funding_total
-  //   "semrush bounce rate", //semrush_bounce_rate
-  //   "semrush bounce rate growth", //semrush_bounce_rate_mom_pct
-  //   "company type", //company_type
-  //   "semrush visit duration growth", //semrush_visit_duration_mom_pct
-  //   "founded date", //founded_on
-  //   "website", //website
-  //   "total equity funding amount", //equity_funding_total
-  //   "number of funding rounds", //num_funding_rounds
-  //   "number of articles", //num_articles
-  //   "contact email", //contact_email
-  //   "funding status", //funding_stage
-  //   "last funding amount", //last_funding_total
-  //   "trend scord (7days)", //rank_delta_d7
-  //   "trend scord (30days)", //rank_delta_d30
-  //   "trend scord (90days)", //rank_delta_d90
-  //   "full description", //description
-  //   "description", //short_description
-  //   "number of acquisitions", //num_acquisitions
-  //   "operating status", //operating_status
-  //   "number of lead investors", //num_lead_investors
-  //   "number of employees", //num_employees_enum
-  //   "total funding amount", //funding_total
-  //   "last equity funding type", //last_equity_funding_type
-  //   "acquisition status", //acquisition_status
-  //   "ipo status", //ipo_status
-  //   "semrush visit pageviews / visit", //semrush_visit_pageviews
-  //   "semrush visit pageviews / visit Growth", //semrush_visit_pageview_mom_pct
-  //   "rank_org_company", //cb rank (company)
-  //   "rank_org", //cb rank (organization)
-  //   "semrush global traffic rank", //semrush_global_rank
-  //   "semrush monthly rank growth", //semrush_global_rank_mom_pct
-  //   "semrush monthly rank change", //semrush_global_rank_mom
-  // ];
   const TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS: string[] = [
     "basic info",
     "headquaters",
@@ -875,7 +829,8 @@ export async function runDiscoverScrape(
     await rewindResultsToFirstPage(log, signal, maxPages);
 
     // Scrape by capturing Crunchbase search API responses only.
-    let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null = null;
+    let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null =
+      null;
     for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
       if (signal?.aborted) {
         const err = new Error("Cancelled by user");
@@ -911,7 +866,8 @@ export async function runDiscoverScrape(
           ) as Record<string, unknown>[])
         : [];
       const count =
-        typeof captured.body.count === "number" && Number.isFinite(captured.body.count)
+        typeof captured.body.count === "number" &&
+        Number.isFinite(captured.body.count)
           ? captured.body.count
           : null;
 
