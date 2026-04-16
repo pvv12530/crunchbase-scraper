@@ -14,17 +14,6 @@ import {
   waitForCheckboxChecked,
   waitForElement,
 } from "./discoverDomUtils";
-import {
-  extractAnyImageIdFromElement,
-  extractCellPlainText,
-  extractCrunchbaseImageId,
-  normalizeRangeValue,
-  normalizeRevenueRangeEnum,
-  parseCrunchbaseOrgPermalinkFromHref,
-  parseEntityIdentifiersFromCell,
-  parseMoneyValue,
-  type MoneyValue,
-} from "./discoverParsers";
 
 const SOURCE_CRUNCHBASE_DISCOVER_ORGS = "crunchbase-discover-orgs" as const;
 const DISCOVER_ORGS_PATH = "/discover/organization.companies";
@@ -38,11 +27,9 @@ const DELAYS = {
   afterMenuOpenMs: 250,
   afterToggleColumnMs: 200,
   afterApplyViewMs: 1000,
-  afterApplyFiltersWaitMs: 20_000,
-  initialResultsSettleMs: 2200,
-  betweenPagesSettleMs: 2200,
   beforeNextClickMs: 60_000, // IMPORTANT: wait 1 min before clicking Next
   afterNextClickMs: 1600,
+  afterApplyFiltersWaitMs: 20_000,
 };
 
 const SELECTORS = {
@@ -69,7 +56,6 @@ const SELECTORS = {
     ".results-grid",
     "sheet-grid",
   ],
-  noResults: [".no-results-content", "no-content .no-results-content"],
 
   // Results header settings → "Edit table view" flow
   resultsHeaderSettingsButton: [
@@ -430,15 +416,6 @@ function waitForResultsRoot(
   return waitForElement(selector, { timeoutMs, signal }).then(() => undefined);
 }
 
-function hasNoResults(): boolean {
-  for (const sel of SELECTORS.noResults) {
-    const el = document.querySelector(sel);
-    if (el && (el.textContent ?? "").toLowerCase().includes("no results"))
-      return true;
-  }
-  return false;
-}
-
 async function applyFinancialsValuationDateFilter(
   startDate: string,
   endDate: string,
@@ -625,52 +602,28 @@ async function rewindResultsToFirstPage(
   );
 }
 
-function findResultsGridRoot(): Element | null {
-  return (
-    document.querySelector(".results-grid") ??
-    document.querySelector("sheet-grid .results-grid") ??
-    document.querySelector("sheet-grid")
-  );
-}
-
-function scrapeResultsGridHeaderColumnIds(root: ParentNode): string[] {
-  const headerRow = root.querySelector("grid-header-row");
-  if (!headerRow) return [];
-  const ids: string[] = [];
-  for (const cell of headerRow.querySelectorAll("grid-cell[data-columnid]")) {
-    const id = cell.getAttribute("data-columnid");
-    if (id && !ids.includes(id)) ids.push(id);
-  }
-  return ids;
-}
-
-type DiscoverIdentifier = {
-  permalink: string;
-  image_id: string;
-  value?: string;
-};
-type DiscoverRow = Record<string, unknown> & {
-  identifier?: DiscoverIdentifier;
+type CustomAdvancedSearchResponse = {
+  url: string;
+  body: {
+    count?: number;
+    entities?: unknown[];
+  } & Record<string, unknown>;
 };
 
-type OrgPreviewResponse = Record<string, unknown>;
-
-const ORG_PREVIEW_BY_PERMALINK = new Map<string, OrgPreviewResponse>();
-
-type PendingPreview = {
-  resolve: (v: OrgPreviewResponse | null) => void;
+type PendingSearch = {
+  resolve: (v: CustomAdvancedSearchResponse | null) => void;
   timer: number;
 };
-const ORG_PREVIEW_PENDING = new Map<string, PendingPreview>();
-let ORG_PREVIEW_LISTENER_INSTALLED = false;
+const SEARCH_RESULTS_PENDING = new Map<string, PendingSearch>();
+let SEARCH_RESULTS_LISTENER_INSTALLED = false;
 
-function ensureOrgPreviewNetworkInterceptorInstalled(): void {
+function ensureSearchResultsNetworkInterceptorInstalled(): void {
   injectPageHook();
 }
 
-function ensureOrgPreviewListenerInstalled(): void {
-  if (ORG_PREVIEW_LISTENER_INSTALLED) return;
-  ORG_PREVIEW_LISTENER_INSTALLED = true;
+function ensureSearchResultsListenerInstalled(): void {
+  if (SEARCH_RESULTS_LISTENER_INSTALLED) return;
+  SEARCH_RESULTS_LISTENER_INSTALLED = true;
 
   window.addEventListener("message", (ev: MessageEvent) => {
     const d = ev.data as unknown;
@@ -682,37 +635,33 @@ function ensureOrgPreviewListenerInstalled(): void {
       body?: unknown;
     };
     if (msg.source !== PAGE_HOOK_SOURCE) return;
-    if (msg.kind !== "orgPreview") return;
-    const json = msg.body;
-    if (!json || typeof json !== "object") return;
+    if (msg.kind !== "searchResults") return;
+    if (typeof msg.url !== "string") return;
+    if (!msg.body || typeof msg.body !== "object") return;
 
-    // Since we hover sequentially, attribute any orgPreview response to the single pending hover.
-    if (ORG_PREVIEW_PENDING.size !== 1) return;
-    const key = Array.from(ORG_PREVIEW_PENDING.keys())[0] ?? "";
+    // We paginate sequentially; attribute the captured response to the single pending wait.
+    if (SEARCH_RESULTS_PENDING.size !== 1) return;
+    const key = Array.from(SEARCH_RESULTS_PENDING.keys())[0] ?? "";
     if (!key) return;
+    const pending = SEARCH_RESULTS_PENDING.get(key);
+    if (!pending) return;
 
-    ORG_PREVIEW_BY_PERMALINK.set(key, json as OrgPreviewResponse);
-    const pending = ORG_PREVIEW_PENDING.get(key);
-    if (pending) {
-      window.clearTimeout(pending.timer);
-      ORG_PREVIEW_PENDING.delete(key);
-      pending.resolve(json as OrgPreviewResponse);
-    }
+    window.clearTimeout(pending.timer);
+    SEARCH_RESULTS_PENDING.delete(key);
+    pending.resolve({
+      url: msg.url,
+      body: msg.body as CustomAdvancedSearchResponse["body"],
+    });
   });
 }
 
-async function hoverAndCaptureOrgPreview(
-  permalinkKey: string,
-  anchor: HTMLAnchorElement,
+async function waitForCustomAdvancedSearchResults(
+  key: string,
+  timeoutMs: number,
   signal?: AbortSignal,
-): Promise<OrgPreviewResponse | null> {
-  const key = (permalinkKey ?? "").trim();
-  if (!key) return null;
-  const cached = ORG_PREVIEW_BY_PERMALINK.get(key);
-  if (cached) return cached;
-
-  ensureOrgPreviewNetworkInterceptorInstalled();
-  ensureOrgPreviewListenerInstalled();
+): Promise<CustomAdvancedSearchResponse | null> {
+  ensureSearchResultsNetworkInterceptorInstalled();
+  ensureSearchResultsListenerInstalled();
 
   if (signal?.aborted) {
     const err = new Error("Cancelled by user");
@@ -720,392 +669,19 @@ async function hoverAndCaptureOrgPreview(
     throw err;
   }
 
-  // Create the wait "slot" before triggering hover, so we don't miss very fast responses.
-  const wait = new Promise<OrgPreviewResponse | null>((resolve) => {
-    const existing = ORG_PREVIEW_PENDING.get(key);
+  return await new Promise<CustomAdvancedSearchResponse | null>((resolve) => {
+    const cleaned = (key ?? "").trim() || "default";
+    const existing = SEARCH_RESULTS_PENDING.get(cleaned);
     if (existing) {
       window.clearTimeout(existing.timer);
-      ORG_PREVIEW_PENDING.delete(key);
+      SEARCH_RESULTS_PENDING.delete(cleaned);
     }
     const t = window.setTimeout(() => {
-      ORG_PREVIEW_PENDING.delete(key);
+      SEARCH_RESULTS_PENDING.delete(cleaned);
       resolve(null);
-    }, 10_000);
-    ORG_PREVIEW_PENDING.set(key, { resolve, timer: t });
+    }, timeoutMs);
+    SEARCH_RESULTS_PENDING.set(cleaned, { resolve, timer: t });
   });
-
-  window.postMessage({ type: "cb-hover/setCurrent", key }, "*");
-  // Give Crunchbase UI time to trigger the preview request.
-  await sleep(120);
-  if (signal?.aborted) {
-    const err = new Error("Cancelled by user");
-    err.name = "AbortError";
-    throw err;
-  }
-
-  // Trigger hover.
-  try {
-    anchor.dispatchEvent(
-      new MouseEvent("mouseenter", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-      }),
-    );
-    anchor.dispatchEvent(
-      new MouseEvent("mouseover", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-      }),
-    );
-  } catch {
-    // ignore
-  }
-
-  // Give the UI/network a moment to fire the request before we start waiting.
-  await sleep(900);
-  if (signal?.aborted) {
-    const err = new Error("Cancelled by user");
-    err.name = "AbortError";
-    throw err;
-  }
-
-  return await wait;
-}
-
-async function enrichOrganizationPreviewsInRows(
-  rowsWithAnchors: {
-    row: DiscoverRow;
-    anchor: HTMLAnchorElement;
-    key: string;
-  }[],
-  log: (t: string) => void | Promise<void>,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!Array.isArray(rowsWithAnchors) || rowsWithAnchors.length === 0) return;
-
-  let fetched = 0;
-  for (const it of rowsWithAnchors) {
-    if (signal?.aborted) {
-      const err = new Error("Cancelled by user");
-      err.name = "AbortError";
-      throw err;
-    }
-    const preview: any = await hoverAndCaptureOrgPreview(
-      it.key,
-      it.anchor,
-      signal,
-    );
-    if (preview) {
-      const location_identifiers =
-        preview.cards.overview_image_description.location_identifiers;
-      const identifier = preview.cards.overview_image_description.identifier;
-      (it.row as Record<string, unknown>).location_identifiers =
-        location_identifiers;
-      if (identifier !== undefined && identifier !== null) {
-        // Replace if present; add if missing.
-        (it.row as Record<string, unknown>).identifier = identifier;
-      }
-      (it.row as Record<string, unknown>).org_details = preview;
-      fetched += 1;
-    }
-    // Small spacing so hover-triggered requests don't overlap.
-    await sleep(250);
-  }
-
-  if (fetched > 0)
-    await log(
-      `Enriched ${fetched}/${rowsWithAnchors.length} row${rowsWithAnchors.length === 1 ? "" : "s"} with organization preview data.`,
-    );
-  else
-    await log(
-      `Hovered ${rowsWithAnchors.length} org row${rowsWithAnchors.length === 1 ? "" : "s"} but captured 0 org details responses (endpoint may differ or requests may be blocked).`,
-    );
-}
-
-type FxRates = {
-  base: "USD";
-  rates: Record<string, number>;
-  fetchedAt: string;
-};
-
-let FX_RATES_PROMISE: Promise<FxRates | null> | null = null;
-
-async function getUsdFxRates(
-  log: (t: string) => void | Promise<void>,
-  signal?: AbortSignal,
-): Promise<FxRates | null> {
-  if (FX_RATES_PROMISE) return FX_RATES_PROMISE;
-  FX_RATES_PROMISE = (async () => {
-    try {
-      const url = "https://open.er-api.com/v6/latest/USD";
-      const res = await fetch(url, { signal });
-      if (!res.ok) throw new Error(`FX fetch failed: ${res.status}`);
-      const body = (await res.json()) as unknown;
-      if (!body || typeof body !== "object")
-        throw new Error("FX response invalid");
-      const o = body as Record<string, unknown>;
-      const rates = o.rates as Record<string, unknown> | undefined;
-      if (!rates || typeof rates !== "object")
-        throw new Error("FX rates missing");
-
-      const out: Record<string, number> = {};
-      for (const [k, v] of Object.entries(rates)) {
-        if (typeof v === "number" && Number.isFinite(v) && v > 0) out[k] = v;
-      }
-      // Ensure USD is present.
-      out.USD = 1;
-      return { base: "USD", rates: out, fetchedAt: new Date().toISOString() };
-    } catch (e) {
-      await log(
-        `FX rates unavailable; leaving value_usd null for non-USD currencies: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      return null;
-    }
-  })();
-  return FX_RATES_PROMISE;
-}
-
-async function enrichUsdValuesInRows(
-  rows: DiscoverRow[],
-  log: (t: string) => void | Promise<void>,
-  signal?: AbortSignal,
-): Promise<void> {
-  let needsFx = false;
-  for (const r of rows) {
-    for (const v of Object.values(r)) {
-      if (
-        v &&
-        typeof v === "object" &&
-        "currency" in (v as object) &&
-        "value" in (v as object) &&
-        "value_usd" in (v as object)
-      ) {
-        const mv = v as MoneyValue;
-        if (mv.currency && mv.currency !== "USD" && mv.value_usd == null) {
-          needsFx = true;
-          break;
-        }
-      }
-    }
-    if (needsFx) break;
-  }
-  if (!needsFx) return;
-
-  const fx = await getUsdFxRates(log, signal);
-  if (!fx) return;
-
-  for (const r of rows) {
-    for (const [k, v] of Object.entries(r)) {
-      if (
-        v &&
-        typeof v === "object" &&
-        "currency" in (v as object) &&
-        "value" in (v as object) &&
-        "value_usd" in (v as object)
-      ) {
-        const mv = v as MoneyValue;
-        if (mv.currency === "USD") continue;
-        if (mv.value_usd != null) continue;
-        const rate = fx.rates[mv.currency];
-        if (!rate || !Number.isFinite(rate) || rate <= 0) continue;
-
-        // fx.rates is "1 USD = rate <currency>"
-        const usd = Math.round(mv.value / rate);
-        r[k] = { ...mv, value_usd: Number.isFinite(usd) ? usd : null };
-      }
-    }
-  }
-}
-
-function scrapeResultsGridRowsFromDom(root: ParentNode): {
-  rows: DiscoverRow[];
-  orgAnchors: { row: DiscoverRow; anchor: HTMLAnchorElement; key: string }[];
-} {
-  const out: DiscoverRow[] = [];
-  const orgAnchors: {
-    row: DiscoverRow;
-    anchor: HTMLAnchorElement;
-    key: string;
-  }[] = [];
-  const candidates = root.querySelectorAll("grid-row");
-  for (const row of candidates) {
-    if (!(row instanceof Element)) continue;
-    if (!row.querySelector('grid-cell[data-columnid="identifier"]')) continue;
-    const cells = row.querySelectorAll("grid-cell[data-columnid]");
-    if (cells.length === 0) continue;
-    const rec: DiscoverRow = {};
-    for (const cell of cells) {
-      const id = cell.getAttribute("data-columnid");
-      if (!id) continue;
-
-      if (id === "location_identifiers") continue;
-
-      if (id === "identifier") {
-        const a = cell.querySelector("a[href]") as HTMLAnchorElement | null;
-        const img = cell.querySelector("img[src]") as HTMLImageElement | null;
-        const permalink =
-          (a?.href ? parseCrunchbaseOrgPermalinkFromHref(a.href) : null) || "";
-        const imageId =
-          extractCrunchbaseImageId(img?.src ?? "") ||
-          extractAnyImageIdFromElement(cell);
-        const value = (a?.getAttribute("title") ?? a?.textContent ?? "")
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (a && permalink)
-          orgAnchors.push({ row: rec, anchor: a, key: permalink });
-
-        if (imageId) {
-          rec.identifier = { permalink, image_id: imageId, value };
-        } else {
-          const t = extractCellPlainText(cell);
-          if (t && t !== "—") rec.identifier_label = t;
-        }
-        continue;
-      }
-
-      if (id === "location_group_identifiers") {
-        const anchors = Array.from(cell.querySelectorAll("a[href]")).filter(
-          (a): a is HTMLAnchorElement => a instanceof HTMLAnchorElement,
-        );
-        const parsed: { permalink: string; value: string }[] = [];
-        for (const a of anchors) {
-          const href = a.getAttribute("href") ?? "";
-          const txt = (a.getAttribute("title") ?? a.textContent ?? "")
-            .replace(/\s+/g, " ")
-            .trim();
-          if (!href || !txt) continue;
-
-          // Examples:
-          // /search/organizations/field/organization.companies/location_identifiers/tokyo-tokyo
-          // /search/organizations/field/organization.companies/location_group_identifiers/asia-pacific
-          const m = href
-            .replace(/\/+$/, "")
-            .match(
-              /\/(location_identifiers|location_group_identifiers)\/([^/]+)$/i,
-            );
-          if (!m?.[2]) continue;
-          const permalink = decodeURIComponent(m[2]);
-          parsed.push({ permalink, value: txt });
-        }
-        if (parsed.length > 0) {
-          rec[id] = parsed;
-          continue;
-        }
-        // Fall back to plain text if Crunchbase renders this cell without links.
-      }
-
-      if (id === "linkedin") {
-        const a = cell.querySelector(
-          'a[href*="linkedin.com"]',
-        ) as HTMLAnchorElement | null;
-        const href = a?.href?.trim() ?? "";
-        if (href) {
-          rec[id] = { value: href };
-          continue;
-        }
-      }
-
-      if (id === "twitter") {
-        const a = cell.querySelector(
-          'a[href*="twitter.com"], a[href*="x.com"]',
-        ) as HTMLAnchorElement | null;
-        const href = a?.href?.trim() ?? "";
-        if (href) {
-          rec[id] = { value: href };
-          continue;
-        }
-      }
-
-      if (id === "facebook") {
-        const a = cell.querySelector(
-          'a[href*="facebook.com"]',
-        ) as HTMLAnchorElement | null;
-        const href = a?.href?.trim() ?? "";
-        if (href) {
-          rec[id] = { value: href };
-          continue;
-        }
-      }
-
-      if (id === "investor_identifiers" || id === "founder_identifier") {
-        const ids = parseEntityIdentifiersFromCell(cell);
-        if (ids.length > 0) {
-          rec[id] =
-            id === "investor_identifiers"
-              ? ids.map(({ permalink, entity_def_id, value }) => ({
-                  permalink,
-                  entity_def_id,
-                  value,
-                }))
-              : ids;
-          continue;
-        }
-      }
-
-      const t = extractCellPlainText(cell);
-      // If any value is "—", omit the field for that company.
-      if (!t || t === "—") continue;
-
-      const pct = t.match(/^(-?\d+(?:\.\d+)?)\s*%$/);
-      if (pct?.[1]) {
-        rec[id] = pct[1];
-        continue;
-      }
-
-      if (id === "revenue_range") {
-        const norm = normalizeRevenueRangeEnum(t);
-        if (norm) {
-          rec[id] = norm;
-          continue;
-        }
-      }
-
-      const rangeNorm = normalizeRangeValue(t);
-      if (rangeNorm) {
-        rec[id] = rangeNorm;
-        continue;
-      }
-
-      const money = parseMoneyValue(t);
-      if (money) {
-        rec[id] = money;
-        continue;
-      }
-
-      rec[id] = t;
-    }
-    if (Object.keys(rec).length > 0) out.push(rec);
-  }
-  return { rows: out, orgAnchors };
-}
-
-function mergeColumnOrder(headerIds: string[], rows: DiscoverRow[]): string[] {
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const id of headerIds) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      ordered.push(id);
-    }
-  }
-  for (const r of rows) {
-    for (const k of Object.keys(r)) {
-      if (!seen.has(k)) {
-        seen.add(k);
-        ordered.push(k);
-      }
-    }
-  }
-  return ordered;
-}
-
-function discoverRowDedupeKey(row: DiscoverRow): string {
-  const permalink = row.identifier?.permalink?.trim() ?? "";
-  if (permalink.length > 0) return permalink;
-  return JSON.stringify(row);
 }
 
 type DateRangeRun = {
@@ -1136,6 +712,10 @@ export async function runDiscoverScrape(
 ): Promise<number> {
   assertDiscoverOrgPage();
   const ranges = buildPerDateRuns(dateKeyOrKeys);
+
+  // Install network capture for the main search endpoint early.
+  ensureSearchResultsNetworkInterceptorInstalled();
+  ensureSearchResultsListenerInstalled();
 
   // Configure table columns in the results view (optional but recommended).
   // NOTE: Put your desired column labels here (exact strings you would type into the "Find a filter..." box).
@@ -1209,6 +789,21 @@ export async function runDiscoverScrape(
   let didConfigureView = false;
   let totalRows = 0;
 
+  // IMPORTANT: configure table view first (per user request).
+  // This relies on the results header being rendered.
+  try {
+    await configureResultsTableView(
+      TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
+      log,
+      signal,
+    );
+    didConfigureView = true;
+  } catch (e) {
+    await log(
+      `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
   for (const r of ranges) {
     let totalRowsForDate = 0;
     if (signal?.aborted) {
@@ -1241,10 +836,19 @@ export async function runDiscoverScrape(
       await log("Could not find Financials filter-group button (continuing).");
     }
 
+    // Start waiting for the first page API response as early as possible, so we
+    // don't miss the response that fires immediately after applying the date filter.
+    const firstWait = waitForCustomAdvancedSearchResults(
+      `${r.runKey}/page-1`,
+      90_000,
+      signal,
+    );
+
     await log("Waiting 10s for results to reload after date change…");
     await sleep(DELAYS.afterDatesResultsLoadMs);
 
     if (!didConfigureView) {
+      // If configuration earlier failed (or results weren't visible yet), retry once after filters.
       try {
         await configureResultsTableView(
           TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
@@ -1270,7 +874,8 @@ export async function runDiscoverScrape(
     const maxPages = 500;
     await rewindResultsToFirstPage(log, signal, maxPages);
 
-    // Scrape from DOM (no network JSON capture).
+    // Scrape by capturing Crunchbase search API responses only.
+    let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null = null;
     for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
       if (signal?.aborted) {
         const err = new Error("Cancelled by user");
@@ -1278,51 +883,40 @@ export async function runDiscoverScrape(
         throw err;
       }
 
-      await sleep(
+      const captured =
         pageIndex === 0
-          ? DELAYS.initialResultsSettleMs
-          : DELAYS.betweenPagesSettleMs,
-      );
-
-      if (hasNoResults()) {
-        await log("No results found for current filters.");
-        const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
-        const record: ChunkRecord = {
-          dateKey: r.runKey,
-          sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
-          chunkId,
-          pageIndex: pageIndex + 1,
-          rowCount: 0,
-          capturedAt: new Date().toISOString(),
-          payload: {
-            mode: "dom-grid",
-            runKey: r.runKey,
-            startDate: r.startDate,
-            endDate: r.endDate,
-            pageIndex: pageIndex + 1,
-            capturedUrl: window.location.href,
-            columns: [],
-            gridRows: [],
-            note: "no_results_found",
-          },
-        };
-        await emitChunk(record);
+          ? await (async () => {
+              await log("Waiting for search API response (page 1) …");
+              return await firstWait;
+            })()
+          : await (nextPageWait ??
+              waitForCustomAdvancedSearchResults(
+                `${r.runKey}/page-${pageIndex + 1}`,
+                90_000,
+                signal,
+              ));
+      if (!captured) {
+        await log(
+          `No matching search API response captured for page ${pageIndex + 1} (source=custom_advanced_search). Stopping pagination.`,
+        );
         break;
       }
+      nextPageWait = null;
 
-      const gridRoot = findResultsGridRoot();
-      const headerIds = gridRoot
-        ? scrapeResultsGridHeaderColumnIds(gridRoot)
+      const entitiesRaw = captured.body.entities;
+      const entities: Record<string, unknown>[] = Array.isArray(entitiesRaw)
+        ? (entitiesRaw.filter(
+            (x): x is Record<string, unknown> =>
+              !!x && typeof x === "object" && !Array.isArray(x),
+          ) as Record<string, unknown>[])
         : [];
-      const scraped = gridRoot
-        ? scrapeResultsGridRowsFromDom(gridRoot)
-        : { rows: [], orgAnchors: [] };
-      const pageRows = scraped.rows;
-      await enrichUsdValuesInRows(pageRows, log, signal);
-      await enrichOrganizationPreviewsInRows(scraped.orgAnchors, log, signal);
+      const count =
+        typeof captured.body.count === "number" && Number.isFinite(captured.body.count)
+          ? captured.body.count
+          : null;
 
-      totalRows += pageRows.length;
-      totalRowsForDate += pageRows.length;
+      totalRows += entities.length;
+      totalRowsForDate += entities.length;
 
       const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
       const record: ChunkRecord = {
@@ -1330,21 +924,24 @@ export async function runDiscoverScrape(
         sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
         chunkId,
         pageIndex: pageIndex + 1,
-        rowCount: pageRows.length,
+        rowCount: entities.length,
         capturedAt: new Date().toISOString(),
         payload: {
-          mode: "dom-grid",
+          mode: "api-search",
           runKey: r.runKey,
           startDate: r.startDate,
           endDate: r.endDate,
           pageIndex: pageIndex + 1,
           capturedUrl: window.location.href,
-          columns: headerIds,
-          gridRows: pageRows,
+          apiUrl: captured.url,
+          apiCount: count,
+          gridRows: entities,
         },
       };
       await emitChunk(record);
-      await log(`Saved ${chunkId} (rows=${pageRows.length})`);
+      await log(
+        `Saved ${chunkId} (entities=${entities.length}${count != null ? `; count=${count}` : ""})`,
+      );
 
       const next = findNextButton();
       if (!next) {
@@ -1356,13 +953,18 @@ export async function runDiscoverScrape(
         break;
       }
 
+      // Trigger loading next page (Crunchbase will call the same API again).
+      // Create the pending slot BEFORE clicking Next so we don't miss fast responses.
+      nextPageWait = waitForCustomAdvancedSearchResults(
+        `${r.runKey}/page-${pageIndex + 2}`,
+        90_000,
+        signal,
+      );
       await log("Waiting 60s before clicking Next…");
       await sleep(DELAYS.beforeNextClickMs);
       next.click();
       await log('Clicked "Next"');
       await sleep(DELAYS.afterNextClickMs);
-      await log("Waiting 20s for next page results…");
-      await sleep(DELAYS.afterApplyFiltersWaitMs);
     }
 
     await opts?.onDateComplete?.(r.runKey, totalRowsForDate);
@@ -1379,11 +981,13 @@ export async function runDiscoverScrapeCurrentResults(
 ): Promise<{
   totalRows: number;
   columns: string[];
-  rows: DiscoverRow[];
+  rows: Record<string, unknown>[];
 }> {
   assertDiscoverOrgPage();
 
-  await log("Scrape mode: current search results (no filter automation).");
+  await log("Scrape mode: current search results (API capture only).");
+  ensureSearchResultsNetworkInterceptorInstalled();
+  ensureSearchResultsListenerInstalled();
   await log("Waiting for results table…");
   try {
     await waitForResultsRoot(12_000, signal);
@@ -1393,16 +997,20 @@ export async function runDiscoverScrapeCurrentResults(
   }
 
   let totalRows = 0;
-  const mergedRows: DiscoverRow[] = [];
-  const seenRowKeys = new Set<string>();
-  let columnOrder: string[] = [];
+  const mergedRows: Record<string, unknown>[] = [];
   const maxPages = 500;
 
   await log("Waiting 10s for results to load…");
   await sleep(DELAYS.afterDatesResultsLoadMs);
 
+  const firstWait = waitForCustomAdvancedSearchResults(
+    `${runKey}/page-1`,
+    90_000,
+    signal,
+  );
   await rewindResultsToFirstPage(log, signal, maxPages);
 
+  let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null = null;
   for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
     if (signal?.aborted) {
       const err = new Error("Cancelled by user");
@@ -1410,50 +1018,36 @@ export async function runDiscoverScrapeCurrentResults(
       throw err;
     }
 
-    await sleep(
+    const captured =
       pageIndex === 0
-        ? DELAYS.initialResultsSettleMs
-        : DELAYS.betweenPagesSettleMs,
-    );
-
-    const gridRoot = findResultsGridRoot();
-    const scraped = gridRoot
-      ? scrapeResultsGridRowsFromDom(gridRoot)
-      : { rows: [], orgAnchors: [] };
-    const pageRows = scraped.rows;
-    await enrichUsdValuesInRows(pageRows, log, signal);
-    await enrichOrganizationPreviewsInRows(scraped.orgAnchors, log, signal);
-    if (gridRoot) {
-      const headerIds = scrapeResultsGridHeaderColumnIds(gridRoot);
-      if (headerIds.length > 0)
-        columnOrder = mergeColumnOrder(headerIds, mergedRows);
-    }
-
-    if (pageRows.length === 0 && hasNoResults()) {
-      await log("No results found for current filters.");
+        ? await firstWait
+        : await (nextPageWait ??
+            waitForCustomAdvancedSearchResults(
+              `${runKey}/page-${pageIndex + 1}`,
+              90_000,
+              signal,
+            ));
+    if (!captured) {
+      await log(
+        `No matching search API response captured for page ${pageIndex + 1} (source=custom_advanced_search). Stopping pagination.`,
+      );
       break;
     }
+    nextPageWait = null;
 
-    let added = 0;
-    for (const r of pageRows) {
-      const key = discoverRowDedupeKey(r);
-      if (seenRowKeys.has(key)) continue;
-      seenRowKeys.add(key);
-      mergedRows.push(r);
-      added += 1;
-    }
-    columnOrder = mergeColumnOrder(columnOrder, mergedRows);
+    const entitiesRaw = captured.body.entities;
+    const entities: Record<string, unknown>[] = Array.isArray(entitiesRaw)
+      ? (entitiesRaw.filter(
+          (x): x is Record<string, unknown> =>
+            !!x && typeof x === "object" && !Array.isArray(x),
+        ) as Record<string, unknown>[])
+      : [];
+
+    mergedRows.push(...entities);
     totalRows = mergedRows.length;
-
-    if (pageRows.length > 0) {
-      await log(
-        `Page ${pageIndex + 1}: scraped ${pageRows.length} row${pageRows.length === 1 ? "" : "s"} from the table (${added} new after de-dupe).`,
-      );
-    } else {
-      await log(
-        "Could not read results table rows yet — results may still be loading.",
-      );
-    }
+    await log(
+      `Page ${pageIndex + 1}: captured ${entities.length} entit${entities.length === 1 ? "y" : "ies"} from API (total=${totalRows}).`,
+    );
 
     const chunkId = `page-${String(pageIndex + 1).padStart(3, "0")}`;
     const record: ChunkRecord = {
@@ -1461,19 +1055,24 @@ export async function runDiscoverScrapeCurrentResults(
       sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
       chunkId,
       pageIndex: pageIndex + 1,
-      rowCount: pageRows.length,
+      rowCount: entities.length,
       capturedAt: new Date().toISOString(),
       payload: {
-        mode: "dom-grid",
+        mode: "api-search",
         runKey,
         pageIndex: pageIndex + 1,
         capturedUrl: window.location.href,
-        columns: columnOrder,
-        gridRows: pageRows,
+        apiUrl: captured.url,
+        apiCount:
+          typeof captured.body.count === "number" &&
+          Number.isFinite(captured.body.count)
+            ? captured.body.count
+            : null,
+        gridRows: entities,
       },
     };
     await emitChunk(record);
-    await log(`Saved ${chunkId} (rows=${pageRows.length})`);
+    await log(`Saved ${chunkId} (entities=${entities.length})`);
 
     const next = findNextButton();
     if (!next) {
@@ -1485,19 +1084,21 @@ export async function runDiscoverScrapeCurrentResults(
       break;
     }
 
+    nextPageWait = waitForCustomAdvancedSearchResults(
+      `${runKey}/page-${pageIndex + 2}`,
+      90_000,
+      signal,
+    );
     await log("Waiting 60s before clicking Next…");
     await sleep(DELAYS.beforeNextClickMs);
     next.click();
     await log('Clicked "Next"');
     await sleep(DELAYS.afterNextClickMs);
-    await log("Waiting 20s for next page results…");
-    await sleep(DELAYS.afterApplyFiltersWaitMs);
   }
 
-  const columns = mergeColumnOrder(columnOrder, mergedRows);
   return {
     totalRows: mergedRows.length > 0 ? mergedRows.length : totalRows,
-    columns,
+    columns: [],
     rows: mergedRows,
   };
 }

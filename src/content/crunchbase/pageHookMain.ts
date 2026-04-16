@@ -10,10 +10,28 @@
     /\/v4\/data\/entities\/organizations\/[^/?#]+/i.test(u) &&
     /layout_mode=preview/i.test(u);
 
+  const isCustomAdvancedSearchUrl = (u: string): boolean => {
+    try {
+      if (!/\/v4\/data\/searches\/organization\.companies/i.test(u)) return false;
+      const parsed = new URL(u, window.location.origin);
+      return parsed.searchParams.get("source") === "custom_advanced_search";
+    } catch {
+      return false;
+    }
+  };
+
   const post = (url: string, body: unknown) => {
     try {
-      if (!isOrgPreviewUrl(url)) return;
-      window.postMessage({ source: SRC, kind: "orgPreview", url, body }, "*");
+      if (isOrgPreviewUrl(url)) {
+        window.postMessage({ source: SRC, kind: "orgPreview", url, body }, "*");
+        return;
+      }
+      if (isCustomAdvancedSearchUrl(url)) {
+        window.postMessage(
+          { source: SRC, kind: "searchResults", url, body },
+          "*",
+        );
+      }
     } catch {
       // ignore
     }
@@ -39,7 +57,7 @@
         .apply(this, args)
         .then((res) => {
           try {
-            if (url && isOrgPreviewUrl(url)) {
+            if (url && (isOrgPreviewUrl(url) || isCustomAdvancedSearchUrl(url))) {
               const clone = res.clone();
               clone
                 .json()
@@ -75,7 +93,8 @@
           const url = String(
             (this as unknown as { __cbUrl?: string }).__cbUrl ?? "",
           );
-          if (!url || !isOrgPreviewUrl(url)) return;
+          if (!url) return;
+          if (!isOrgPreviewUrl(url) && !isCustomAdvancedSearchUrl(url)) return;
           const txt = this.responseText;
           if (!txt || txt.length > 5_000_000) return;
           post(url, JSON.parse(txt));
