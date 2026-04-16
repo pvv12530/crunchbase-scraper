@@ -103,16 +103,9 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
         },
       );
 
-      // For multi-date runs we emit content/done per date (above).
-      // Keep the single-date behavior for backwards-compat.
-      if (dateKeys.length === 1) {
-        await chrome.runtime.sendMessage({
-          type: 'content/done',
-          tabId: -1,
-          dateKey,
-          totalRows,
-        } satisfies ExtensionMessage);
-      }
+      // `content/done` is emitted once per date from `onDateComplete` inside
+      // `runDiscoverScrape` (including single-date runs). Do not send again here
+      // or the background merges/uploads JSON twice for the same day.
       sendResponse({ ok: true });
     } catch (e) {
       const errText = e instanceof Error ? e.message : String(e);

@@ -13,6 +13,14 @@ function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
 }
 
+/** Local calendar date as YYYY-MM-DD (for "today" log / upload panels). */
+function localDateKey(d = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 type ModeTab = "calendar" | "csv";
 
 const btnBase =
@@ -123,8 +131,7 @@ export function App(): JSX.Element {
   const [selectedDateKey, setSelectedDateKey] = useState<string>("");
   const [selectedDateKeys, setSelectedDateKeys] = useState<string[]>([]);
   const rangeAnchorRef = useRef<string>("");
-  const selectedDateKeyRef = useRef(selectedDateKey);
-  selectedDateKeyRef.current = selectedDateKey;
+  const [todayDateKey, setTodayDateKey] = useState(() => localDateKey());
   const [importedDateOrder, setImportedDateOrder] = useState<string[]>([]);
   const [queueState, setQueueState] = useState<ScrapeQueueState | null>(null);
   const [csvHint, setCsvHint] = useState("");
@@ -227,6 +234,23 @@ export function App(): JSX.Element {
   }, [loadQueueState, refreshTabContext]);
 
   useEffect(() => {
+    const syncToday = () => {
+      const k = localDateKey();
+      setTodayDateKey((prev) => (prev !== k ? k : prev));
+    };
+    syncToday();
+    const id = window.setInterval(syncToday, 60_000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") syncToday();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+
+  useEffect(() => {
     const prev = prevModeTab.current;
     prevModeTab.current = modeTab;
     if (modeTab !== "calendar" || prev === "calendar") return;
@@ -283,19 +307,23 @@ export function App(): JSX.Element {
         void loadQueueState();
       }
       if (msg.type === "scrape/log") {
+        const bucket = localDateKey();
+        const text =
+          isDateKey(msg.dateKey) && msg.dateKey !== bucket
+            ? `[${msg.dateKey}] ${msg.text}`
+            : msg.text;
         setLogsByDate((prev) => {
-          const cur = prev[msg.dateKey] ?? [];
+          const cur = prev[bucket] ?? [];
           const next = [
             ...cur,
-            { at: msg.at, level: msg.level, text: msg.text },
+            { at: msg.at, level: msg.level, text },
           ].slice(-LOGS_MAX_PER_DATE);
-          return { ...prev, [msg.dateKey]: next };
+          return { ...prev, [bucket]: next };
         });
-        setSelectedDateKey((cur) => cur || msg.dateKey);
       }
       if (msg.type === "scrape/jsonArtifactsUpdated") {
         const dk = msg.dateKey;
-        if (!isDateKey(dk) || dk !== selectedDateKeyRef.current) return;
+        if (!isDateKey(dk) || dk !== localDateKey()) return;
         setRemoteJsonLoading(true);
         setRemoteJsonError("");
         void (async () => {
@@ -316,7 +344,7 @@ export function App(): JSX.Element {
   }, [loadQueueState, refreshTabContext]);
 
   useEffect(() => {
-    if (!isDateKey(selectedDateKey)) {
+    if (!isDateKey(todayDateKey)) {
       setRemoteJsonFiles([]);
       setRemoteJsonError("");
       setRemoteJsonLoading(false);
@@ -326,7 +354,7 @@ export function App(): JSX.Element {
     setRemoteJsonError("");
     void (async () => {
       try {
-        const files = await fetchJsonFilesByDate(selectedDateKey);
+        const files = await fetchJsonFilesByDate(todayDateKey);
         setRemoteJsonFiles(files);
       } catch (e) {
         setRemoteJsonFiles([]);
@@ -335,7 +363,7 @@ export function App(): JSX.Element {
         setRemoteJsonLoading(false);
       }
     })();
-  }, [selectedDateKey]);
+  }, [todayDateKey]);
 
   const onScrape = async () => {
     const dates =
@@ -347,20 +375,25 @@ export function App(): JSX.Element {
             ? [selectedDateKey]
             : [];
     const runKey = dates[0] ?? selectedDateKey;
+    const logBucket = localDateKey();
+    const primary = dates[0] ?? runKey;
+    const clickText =
+      dates.length > 1
+        ? `Clicked scrape (${dates.length} dates, first=${String(dates[0] ?? "")})`
+        : isDateKey(primary)
+          ? `Clicked scrape for ${primary}`
+          : "Clicked scrape button";
     setLogsByDate((prev) => {
-      const cur = prev[runKey] ?? [];
+      const cur = prev[logBucket] ?? [];
       const next = [
         ...cur,
         {
           at: new Date().toISOString(),
           level: "info" as const,
-          text:
-            dates.length > 1
-              ? `Clicked scrape button (dates=${dates.length})`
-              : "Clicked scrape button",
+          text: clickText,
         },
       ].slice(-LOGS_MAX_PER_DATE);
-      return { ...prev, [runKey]: next };
+      return { ...prev, [logBucket]: next };
     });
     if (modeTab === "csv") {
       const first = dates[0];
@@ -399,10 +432,10 @@ export function App(): JSX.Element {
   };
 
   const onClearLogHistory = () => {
-    if (!isDateKey(selectedDateKey)) return;
+    if (!isDateKey(todayDateKey)) return;
     setLogsByDate((prev) => {
       const next = { ...prev };
-      delete next[selectedDateKey];
+      delete next[todayDateKey];
       return next;
     });
   };
@@ -460,7 +493,7 @@ export function App(): JSX.Element {
     hasValidSelectedDate && queueState?.activeDateKey === selectedDateKey;
   const selectedScrapeBusy = selectedQueued || selectedRunning;
 
-  const selectedLogs = logsByDate[selectedDateKey] ?? [];
+  const todayLogs = logsByDate[todayDateKey] ?? [];
 
   return (
     <div className="min-h-screen bg-[#0f1115] p-3 text-[13px] font-sans leading-snug text-[#e8eaef] antialiased">
@@ -656,28 +689,26 @@ export function App(): JSX.Element {
         <div className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h3 className="m-0 text-xs font-medium text-[#9aa3b2]">
-              Log history ({selectedDateKey || "—"})
+              Log history (today — {todayDateKey})
             </h3>
             <button
               type="button"
               className={btnBase}
-              disabled={!hasValidSelectedDate || selectedLogs.length === 0}
+              disabled={todayLogs.length === 0}
               onClick={onClearLogHistory}
             >
               Clear
             </button>
           </div>
-          {!hasValidSelectedDate ? (
+          {todayLogs.length === 0 ? (
             <p className="m-0 text-[11px] text-[#9aa3b2]">
-              Select a date to view logs for that run.
-            </p>
-          ) : selectedLogs.length === 0 ? (
-            <p className="m-0 text-[11px] text-[#9aa3b2]">
-              No log lines yet for this date.
+              No log lines yet for today. Scrapes for any selected date append
+              here; lines from other dates are prefixed{" "}
+              <span className="font-mono text-[#b8c0cc]">[YYYY-MM-DD]</span>.
             </p>
           ) : (
             <ul className="m-0 max-h-[min(200px,35vh)] list-none space-y-1 overflow-y-auto p-0 font-mono text-[11px] leading-relaxed">
-              {selectedLogs.map((line, i) => {
+              {todayLogs.map((line, i) => {
                 const color =
                   line.level === "error"
                     ? "text-[#f0a96e]"
@@ -701,23 +732,26 @@ export function App(): JSX.Element {
         </div>
 
         <h3 className="mb-1.5 mt-3 text-xs font-medium text-[#9aa3b2]">
-          JSON files for this date (cloud)
+          JSON files for today (cloud — {todayDateKey})
         </h3>
-        <p className="mb-2 m-0 text-[11px] text-[#9aa3b2]">
-          {!hasValidSelectedDate
-            ? "Select a date on the calendar or from the CSV list to load files."
-            : remoteJsonLoading
-              ? "Loading…"
-              : remoteJsonError
-                ? `Error: ${remoteJsonError}`
-                : remoteJsonFiles.length === 0
-                  ? "No files found for this date."
-                  : `${remoteJsonFiles.length} file${remoteJsonFiles.length === 1 ? "" : "s"} found.`}
+        <p className="mb-1 m-0 text-[11px] text-[#9aa3b2]">
+          Cloud files use <span className="font-mono text-[#b8c0cc]">file_date</span>{" "}
+          = today ({todayDateKey}). Scrapes for other dates upload under those
+          dates, not here.
         </p>
-        {hasValidSelectedDate && !remoteJsonLoading && !remoteJsonError ? (
+        <p className="mb-2 m-0 text-[11px] text-[#9aa3b2]">
+          {remoteJsonLoading
+            ? "Loading…"
+            : remoteJsonError
+              ? `Error: ${remoteJsonError}`
+              : remoteJsonFiles.length === 0
+                ? "No files for today's date key."
+                : `${remoteJsonFiles.length} file${remoteJsonFiles.length === 1 ? "" : "s"} found.`}
+        </p>
+        {!remoteJsonLoading && !remoteJsonError ? (
           remoteJsonFiles.length === 0 ? (
             <div className="mb-3 rounded-lg border border-dashed border-[#2a3140] bg-[#12151c]/80 px-3 py-6 text-center text-[12px] text-[#9aa3b2]">
-              No uploaded JSON files for {selectedDateKey}.
+              No uploaded JSON files for {todayDateKey}.
             </div>
           ) : (
             <ul className="m-0 mb-3 max-h-[min(220px,40vh)] list-none space-y-1.5 overflow-y-auto p-0 pr-0.5">
