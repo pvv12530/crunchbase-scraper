@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Loader2, Play, Trash2, Upload } from "lucide-react";
+import {
+  ChevronDown,
+  Download,
+  Loader2,
+  Play,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
 import type { ScrapeQueueState } from "@shared/models";
@@ -156,6 +163,17 @@ export function App(): JSX.Element {
   const [remoteJsonDeletingById, setRemoteJsonDeletingById] = useState<
     Record<string, boolean>
   >({});
+  const logListRef = useRef<HTMLUListElement>(null);
+  const logStickToEndRef = useRef(true);
+  const [logScrollMoreVisible, setLogScrollMoreVisible] = useState(false);
+
+  const updateLogScrollUi = useCallback((el: HTMLUListElement) => {
+    const atBottom =
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    logStickToEndRef.current = atBottom;
+    const canScroll = el.scrollHeight > el.clientHeight + 2;
+    setLogScrollMoreVisible(canScroll && !atBottom);
+  }, []);
 
   const downloadRemoteJsonFile = useCallback(async (f: SupabaseJsonFile) => {
     const publicUrl = `${SUPABASE_JSON_PUBLIC_BASE}${f.file_path}`;
@@ -470,11 +488,45 @@ export function App(): JSX.Element {
   const selectedRunning =
     hasValidSelectedDate && queueState?.activeDateKey === selectedDateKey;
   const selectedScrapeBusy = selectedQueued || selectedRunning;
+  const anyRunning = queueState?.activeDateKey != null;
 
   const todayLogs = logsByDate[todayDateKey] ?? [];
+  const lastLogTail =
+    todayLogs.length > 0
+      ? `${todayLogs[todayLogs.length - 1]!.at}\0${todayLogs[todayLogs.length - 1]!.text}`
+      : "";
+
+  useEffect(() => {
+    logStickToEndRef.current = true;
+  }, [todayDateKey]);
+
+  useEffect(() => {
+    if (todayLogs.length === 0) logStickToEndRef.current = true;
+  }, [todayLogs.length]);
+
+  useEffect(() => {
+    const el = logListRef.current;
+    if (!el || todayLogs.length === 0) {
+      setLogScrollMoreVisible(false);
+      return;
+    }
+    const pinIfStuck = (): void => {
+      if (logStickToEndRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      updateLogScrollUi(el);
+    };
+    const raf = requestAnimationFrame(pinIfStuck);
+    const ro = new ResizeObserver(pinIfStuck);
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [todayLogs.length, lastLogTail, todayDateKey, updateLogScrollUi]);
 
   return (
-    <div className="min-h-screen bg-[#0f1115] p-3 text-[13px] font-sans leading-snug text-[#e8eaef] antialiased">
+    <div className="flex min-h-screen flex-col bg-[#0f1115] p-3 text-[13px] font-sans leading-snug text-[#e8eaef] antialiased">
       <section className="mb-3">
         <span
           className={[
@@ -603,7 +655,10 @@ export function App(): JSX.Element {
         </>
       )}
 
-      <section id="detailPanel">
+      <section
+        id="detailPanel"
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <h2 id="detailTitle" className="mb-2 text-sm font-medium">
           Actions for {selectedDateKey || "—"}
         </h2>
@@ -623,7 +678,7 @@ export function App(): JSX.Element {
             disabled={scrapeDisabled || selectedScrapeBusy}
             onClick={() => void onScrape()}
           >
-            {selectedRunning ? (
+            {anyRunning ? (
               <Loader2
                 className="relative h-[18px] w-[18px] shrink-0 animate-spin text-white drop-shadow-sm"
                 size={18}
@@ -639,7 +694,7 @@ export function App(): JSX.Element {
               />
             )}
             <span className="relative">
-              {selectedRunning
+              {anyRunning
                 ? "Scraping…"
                 : selectedQueued
                   ? "Queued…"
@@ -656,11 +711,6 @@ export function App(): JSX.Element {
             Scrape results
           </button> */}
         </div>
-        <p className="mb-2 text-[11px] text-[#9aa3b2]">
-          {!hasValidSelectedDate
-            ? "Choose a date on the Calendar tab or select a row from your CSV list."
-            : "A new Discover tab is opened per date; the scraper configures table view and date range automatically."}
-        </p>
 
         <div className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -683,31 +733,55 @@ export function App(): JSX.Element {
               <span className="font-mono text-[#b8c0cc]">[YYYY-MM-DD]</span>.
             </p>
           ) : (
-            <ul className="m-0 max-h-[min(200px,35vh)] list-none space-y-1 overflow-y-auto p-0 font-mono text-[11px] leading-relaxed">
-              {todayLogs.map((line, i) => {
-                const color =
-                  line.level === "error"
-                    ? "text-[#f0a96e]"
-                    : line.level === "warn"
-                      ? "text-[#e8c170]"
-                      : "text-[#b8c0cc]";
-                return (
-                  <li
-                    key={`${line.at}-${i}`}
-                    className={`wrap-break-word border-b border-[#2a3140]/60 pb-1 last:border-b-0 ${color}`}
-                  >
-                    <span className="text-[#5c6570]">
-                      {new Date(line.at).toLocaleTimeString()}{" "}
-                    </span>
-                    {line.text}
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="relative">
+              <ul
+                ref={logListRef}
+                onScroll={(e) => updateLogScrollUi(e.currentTarget)}
+                className="m-0 max-h-[min(200px,35vh)] list-none space-y-1 overflow-y-auto overscroll-y-contain rounded-md border border-[#2a3140]/50 bg-[#12151c]/40 p-2 pr-1 font-mono text-[11px] leading-relaxed"
+              >
+                {todayLogs.map((line, i) => {
+                  const color =
+                    line.level === "error"
+                      ? "text-[#f0a96e]"
+                      : line.level === "warn"
+                        ? "text-[#e8c170]"
+                        : "text-[#b8c0cc]";
+                  return (
+                    <li
+                      key={`${line.at}-${i}`}
+                      className={`wrap-break-word border-b border-[#2a3140]/60 pb-1 last:border-b-0 ${color}`}
+                    >
+                      <span className="text-[#5c6570]">
+                        {new Date(line.at).toLocaleTimeString()}{" "}
+                      </span>
+                      {line.text}
+                    </li>
+                  );
+                })}
+              </ul>
+              {logScrollMoreVisible ? (
+                <div
+                  className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center justify-end pb-1.5 text-[#6b7484]"
+                  aria-hidden
+                >
+                  <div className="absolute inset-x-0 bottom-0 h-11 bg-linear-to-t from-[#161a22] via-[#161a22]/88 to-transparent" />
+                  <span className="relative z-1 flex items-center gap-0.5 text-[10px] font-medium tracking-wide">
+                    <ChevronDown className="h-3 w-3 shrink-0" strokeWidth={2} />
+                    More below
+                  </span>
+                </div>
+              ) : null}
+            </div>
           )}
         </div>
 
-        <h3 className="mb-1.5 mt-3 text-xs font-medium text-[#9aa3b2]">
+        <p className="mb-2 text-[11px] text-[#9aa3b2]">
+          {!hasValidSelectedDate
+            ? "Choose a date on the Calendar tab or select a row from your CSV list."
+            : "A new Discover tab is opened per date; the scraper configures table view and date range automatically."}
+        </p>
+
+        <h3 className="mb-1.5 mt-1 text-xs font-medium text-[#9aa3b2]">
           JSON files for today (cloud — {todayDateKey})
         </h3>
         <p className="mb-1 m-0 text-[11px] text-[#9aa3b2]">
@@ -774,7 +848,7 @@ export function App(): JSX.Element {
               })}
             </ul>
           )
-        ) : null}
+               ) : null}
       </section>
     </div>
   );

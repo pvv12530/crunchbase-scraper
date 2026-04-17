@@ -63,10 +63,6 @@ async function save(): Promise<void> {
     .catch(() => {});
 }
 
-async function broadcastQueue(): Promise<void> {
-  await save();
-}
-
 export async function getQueueState(): Promise<ScrapeQueueState> {
   await load();
   return {
@@ -84,14 +80,14 @@ export async function enqueueFromImport(dates: string[]): Promise<void> {
   if (mem.activeDateKey !== null) {
     mem.stagedAfterAbort = next;
     mem.batchOrder = [...next];
-    await broadcastQueue();
+    await save();
     await requestAbortActiveTab();
     return;
   }
   mem.pending = next;
   mem.batchOrder = [...next];
   mem.stagedAfterAbort = null;
-  await broadcastQueue();
+  await save();
 }
 
 /** User retry or manual scrape: prefer this date next (after current job if any). */
@@ -100,7 +96,7 @@ export async function enqueueRetry(dateKey: string): Promise<void> {
   const i = mem.pending.indexOf(dateKey);
   if (i >= 0) mem.pending.splice(i, 1);
   mem.pending.unshift(dateKey);
-  await broadcastQueue();
+  await save();
   await tryStartNext();
 }
 
@@ -109,7 +105,7 @@ export async function clearPendingQueue(): Promise<void> {
   mem.pending = [];
   mem.stagedAfterAbort = null;
   mem.batchOrder = null;
-  await broadcastQueue();
+  await save();
   if (mem.activeDateKey !== null) {
     await requestAbortActiveTab();
   }
@@ -165,10 +161,6 @@ async function assertActiveTabIsDiscoverCompanies(
   return tabId;
 }
 
-async function sleepMs(ms: number): Promise<void> {
-  await new Promise((r) => window.setTimeout(r, ms));
-}
-
 async function sleepWithProgress(
   dateKey: string,
   totalMs: number,
@@ -188,7 +180,7 @@ async function sleepWithProgress(
       emitUiLog(dateKey, `Wait: ${formatMs(remaining)} remaining…`);
       lastRemaining = remaining;
     }
-    await sleepMs(Math.min(750, remaining));
+    await new Promise((r) => window.setTimeout(r, Math.min(750, remaining)));
   }
 }
 
@@ -241,7 +233,7 @@ export async function tryStartNext(): Promise<void> {
 
   const dateKey = mem.pending.shift()!;
   mem.activeDateKey = dateKey;
-  await broadcastQueue();
+  await save();
 
   try {
     // Only run if the *current tab* is already on Discover Companies.
@@ -252,7 +244,7 @@ export async function tryStartNext(): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e);
     mem.activeDateKey = null;
     activeRunTabId = null;
-    await broadcastQueue();
+    await save();
     const meta = await storage.ensureRun(dateKey, SOURCE_CRUNCHBASE_DISCOVER_ORGS);
     await storage.upsertRun({
       ...meta,
@@ -290,6 +282,6 @@ export async function onScrapeFinished(dateKey: string): Promise<void> {
     mem.batchOrder = [...mem.stagedAfterAbort];
     mem.stagedAfterAbort = null;
   }
-  await broadcastQueue();
+  await save();
   await tryStartNext();
 }

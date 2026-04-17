@@ -5,6 +5,13 @@ import * as storage from "../../storage";
 const SUPABASE_FN_UPLOAD_JSON =
   "https://gfxknuxbtkhomfodrrfr.supabase.co/functions/v1/upload-json";
 
+function localDateKey(d = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function rowDedupeKey(row: Record<string, unknown>): string {
   const id = row.identifier;
   if (id && typeof id === "object" && "permalink" in id) {
@@ -131,9 +138,11 @@ export async function exportMergedJsonFromDateChunks(
 
   let uploadOk = false;
   try {
+    const uploadDateKey = localDateKey();
     const fd = new FormData();
-    // Store this file under the scraped date so per-date views can load it.
-    fd.append("date", dateKey);
+    // Store uploads under *today* so the UI "JSON files for today" panel always shows them.
+    // (Scraped date is still encoded in the filename.)
+    fd.append("date", uploadDateKey);
     if (meta.groupId) fd.append("group_id", meta.groupId);
     fd.append(
       "file",
