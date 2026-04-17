@@ -14,6 +14,7 @@ let mem: ScrapeQueueState = {
   stagedAfterAbort: null,
   batchOrder: null,
   multiDateExportSession: false,
+  sessionGroupId: null,
 };
 let loaded = false;
 
@@ -53,6 +54,10 @@ async function load(): Promise<void> {
         : null,
       batchOrder: raw.batchOrder ? [...raw.batchOrder] : null,
       multiDateExportSession: raw.multiDateExportSession === true,
+      sessionGroupId:
+        typeof raw.sessionGroupId === 'string' && raw.sessionGroupId.length > 0
+          ? raw.sessionGroupId
+          : null,
     };
   }
   loaded = true;
@@ -73,14 +78,25 @@ export async function getQueueState(): Promise<ScrapeQueueState> {
     stagedAfterAbort: mem.stagedAfterAbort ? [...mem.stagedAfterAbort] : null,
     batchOrder: mem.batchOrder ? [...mem.batchOrder] : null,
     multiDateExportSession: mem.multiDateExportSession,
+    sessionGroupId: mem.sessionGroupId,
   };
 }
 
 /** Replace queue with CSV import; if a job is running, stage replacement and abort current. */
-export async function enqueueFromImport(dates: string[]): Promise<void> {
+export async function enqueueFromImport(
+  dates: string[],
+  sessionGroupId?: string,
+): Promise<void> {
   await load();
-  const next = [...dates];
+  const cleaned = dates
+    .map((s) => (s ?? '').trim())
+    .filter((s) => s.length > 0);
+  const next = [...new Set(cleaned)];
   const multi = next.length > 1;
+  mem.sessionGroupId =
+    typeof sessionGroupId === 'string' && sessionGroupId.length > 0
+      ? sessionGroupId
+      : null;
   if (mem.activeDateKey !== null) {
     mem.stagedAfterAbort = next;
     mem.batchOrder = [...next];
@@ -102,6 +118,7 @@ export async function enqueueRetry(dateKey: string): Promise<void> {
   // Single-date flow: do not keep a multi-date batchOrder from a prior CSV / multi-select run.
   mem.batchOrder = null;
   mem.multiDateExportSession = false;
+  mem.sessionGroupId = null;
   const i = mem.pending.indexOf(dateKey);
   if (i >= 0) mem.pending.splice(i, 1);
   mem.pending.unshift(dateKey);
@@ -116,6 +133,7 @@ export async function clearBatchOrder(): Promise<void> {
   const hadMulti = mem.multiDateExportSession;
   if (hadBatch) mem.batchOrder = null;
   if (hadMulti) mem.multiDateExportSession = false;
+  if (hadBatch || hadMulti) mem.sessionGroupId = null;
   if (hadBatch || hadMulti) await save();
 }
 
@@ -125,6 +143,7 @@ export async function clearPendingQueue(): Promise<void> {
   mem.stagedAfterAbort = null;
   mem.batchOrder = null;
   mem.multiDateExportSession = false;
+  mem.sessionGroupId = null;
   await save();
   if (mem.activeDateKey !== null) {
     await requestAbortActiveTab();
@@ -207,6 +226,7 @@ async function sleepWithProgress(
 async function sendScrapeStartWithRetries(
   dateKey: string,
   tabId: number,
+  sessionGroupId?: string,
 ): Promise<void> {
   let lastErr: unknown = null;
   let didInject = false;
@@ -218,7 +238,12 @@ async function sendScrapeStartWithRetries(
           ? 'Starting scrape…'
           : `Starting scrape (retry ${attempt + 1}/12)…`,
       );
-      await sendScrapeStartToTab(dateKey, tabId);
+      await sendScrapeStartToTab(
+        dateKey,
+        tabId,
+        undefined,
+        sessionGroupId,
+      );
       return;
     } catch (e) {
       lastErr = e;
@@ -259,7 +284,11 @@ export async function tryStartNext(): Promise<void> {
     // Only run if the *current tab* is already on Discover Companies.
     const tabId = await assertActiveTabIsDiscoverCompanies(dateKey);
     activeRunTabId = tabId;
-    await sendScrapeStartWithRetries(dateKey, tabId);
+    await sendScrapeStartWithRetries(
+      dateKey,
+      tabId,
+      mem.sessionGroupId ?? undefined,
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     mem.activeDateKey = null;

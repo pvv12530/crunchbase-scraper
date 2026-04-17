@@ -1,20 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ChevronDown,
-  Download,
-  Loader2,
-  Play,
-  Trash2,
-  Upload,
-} from "lucide-react";
+import { ChevronDown, Loader2, Play, Upload } from "lucide-react";
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
 import type { ScrapeQueueState } from "@shared/models";
 import { triggerDownload } from "./export/download";
 import { Calendar } from "./components/Calendar";
-
-const SUPABASE_JSON_PUBLIC_BASE =
-  "https://gfxknuxbtkhomfodrrfr.supabase.co/storage/v1/object/public/json-files/";
+import { JsonFilesList } from "./components/JsonFilesList";
+import {
+  SUPABASE_JSON_PUBLIC_BASE,
+  fetchSupabaseJsonFilesByDate,
+  type SupabaseJsonFile,
+} from "./services/supabaseJsonFiles";
 
 function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
@@ -109,31 +105,6 @@ async function savePersistedLogsByDate(next: LogsByDate): Promise<void> {
   }
 }
 
-type SupabaseJsonFile = {
-  id: string;
-  file_date: string;
-  file_path: string;
-  created_at: string;
-  signed_url?: string | null;
-};
-
-async function fetchJsonFilesByDate(date: string): Promise<SupabaseJsonFile[]> {
-  const res = (await chrome.runtime.sendMessage({
-    type: "supabase/getJsonByDate",
-    date,
-  } satisfies ExtensionMessage)) as
-    | { ok: true; files: SupabaseJsonFile[] }
-    | { ok: false; error: string };
-  if (!res || typeof res !== "object" || res.ok !== true) {
-    throw new Error(
-      res && typeof res === "object" && "error" in res
-        ? String((res as { error: unknown }).error)
-        : "getJsonByDate failed",
-    );
-  }
-  return Array.isArray(res.files) ? res.files : [];
-}
-
 export function App(): JSX.Element {
   const [selectedDateKey, setSelectedDateKey] = useState<string>("");
   const [selectedDateKeys, setSelectedDateKeys] = useState<string[]>([]);
@@ -163,6 +134,53 @@ export function App(): JSX.Element {
   const [remoteJsonDeletingById, setRemoteJsonDeletingById] = useState<
     Record<string, boolean>
   >({});
+  /** Supabase `file_date` bucket(s) last queried (for refresh after delete). */
+  const [remoteJsonQueryKeys, setRemoteJsonQueryKeys] = useState<string[]>([]);
+  const [remoteCloudBucketsLabel, setRemoteCloudBucketsLabel] =
+    useState<string>(() => localDateKey());
+
+  const refreshRemoteJsonFilesForKeys = useCallback(
+    async (dateKeysIn: string[]) => {
+      const uniq = [...new Set(dateKeysIn)].filter(isDateKey);
+      if (uniq.length === 0) {
+        setRemoteJsonFiles([]);
+        setRemoteJsonQueryKeys([]);
+        setRemoteCloudBucketsLabel("");
+        setRemoteJsonError("");
+        setRemoteJsonLoading(false);
+        return;
+      }
+      setRemoteJsonLoading(true);
+      setRemoteJsonError("");
+      try {
+        const parts = await Promise.all(
+          uniq.map((k) => fetchSupabaseJsonFilesByDate(k)),
+        );
+        const seen = new Set<string>();
+        const merged: SupabaseJsonFile[] = [];
+        for (const files of parts) {
+          for (const f of files) {
+            if (seen.has(f.id)) continue;
+            seen.add(f.id);
+            merged.push(f);
+          }
+        }
+        merged.sort((a, b) => a.file_path.localeCompare(b.file_path));
+        setRemoteJsonFiles(merged);
+        setRemoteJsonQueryKeys(uniq);
+        setRemoteCloudBucketsLabel(
+          uniq.length > 1 ? uniq.join(" · ") : (uniq[0] ?? ""),
+        );
+      } catch (e) {
+        setRemoteJsonFiles([]);
+        setRemoteJsonError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setRemoteJsonLoading(false);
+      }
+    },
+    [],
+  );
+
   const logListRef = useRef<HTMLUListElement>(null);
   const logStickToEndRef = useRef(true);
   const [logScrollMoreVisible, setLogScrollMoreVisible] = useState(false);
@@ -193,29 +211,34 @@ export function App(): JSX.Element {
     }
   }, []);
 
-  const deleteRemoteJsonFile = useCallback(async (id: string) => {
-    setRemoteJsonError("");
-    setRemoteJsonDeletingById((prev) => ({ ...prev, [id]: true }));
-    try {
-      const res = await fetch(
-        "https://gfxknuxbtkhomfodrrfr.supabase.co/functions/v1/delete-json",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id }),
-        },
-      );
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(
-          `Delete failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`,
+  const deleteRemoteJsonFile = useCallback(
+    async (id: string) => {
+      setRemoteJsonError("");
+      setRemoteJsonDeletingById((prev) => ({ ...prev, [id]: true }));
+      try {
+        const res = await fetch(
+          "https://gfxknuxbtkhomfodrrfr.supabase.co/functions/v1/delete-json",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }),
+          },
         );
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(
+            `Delete failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`,
+          );
+        }
+        await refreshRemoteJsonFilesForKeys(
+          remoteJsonQueryKeys.length > 0 ? remoteJsonQueryKeys : [todayDateKey],
+        );
+      } finally {
+        setRemoteJsonDeletingById((prev) => ({ ...prev, [id]: false }));
       }
-      setRemoteJsonFiles((prev) => prev.filter((x) => x.id !== id));
-    } finally {
-      setRemoteJsonDeletingById((prev) => ({ ...prev, [id]: false }));
-    }
-  }, []);
+    },
+    [refreshRemoteJsonFilesForKeys, remoteJsonQueryKeys, todayDateKey],
+  );
 
   const loadQueueState = useCallback(async () => {
     const q = await chrome.runtime.sendMessage({
@@ -317,49 +340,19 @@ export function App(): JSX.Element {
         });
       }
       if (msg.type === "scrape/jsonArtifactsUpdated") {
-        // Supabase uploads use today's file_date; always refresh that list.
-        const bucket = localDateKey();
-        if (!isDateKey(bucket)) return;
-        setRemoteJsonLoading(true);
-        setRemoteJsonError("");
-        void (async () => {
-          try {
-            const files = await fetchJsonFilesByDate(bucket);
-            setRemoteJsonFiles(files);
-          } catch (e) {
-            setRemoteJsonFiles([]);
-            setRemoteJsonError(e instanceof Error ? e.message : String(e));
-          } finally {
-            setRemoteJsonLoading(false);
-          }
-        })();
+        const keys = Array.isArray(msg.dateKeys)
+          ? msg.dateKeys.filter((k): k is string => isDateKey(k))
+          : [];
+        if (keys.length > 0) void refreshRemoteJsonFilesForKeys(keys);
       }
     };
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
-  }, [loadQueueState]);
+  }, [loadQueueState, refreshRemoteJsonFilesForKeys]);
 
   useEffect(() => {
-    if (!isDateKey(todayDateKey)) {
-      setRemoteJsonFiles([]);
-      setRemoteJsonError("");
-      setRemoteJsonLoading(false);
-      return;
-    }
-    setRemoteJsonLoading(true);
-    setRemoteJsonError("");
-    void (async () => {
-      try {
-        const files = await fetchJsonFilesByDate(todayDateKey);
-        setRemoteJsonFiles(files);
-      } catch (e) {
-        setRemoteJsonFiles([]);
-        setRemoteJsonError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setRemoteJsonLoading(false);
-      }
-    })();
-  }, [todayDateKey]);
+    void refreshRemoteJsonFilesForKeys([todayDateKey]);
+  }, [todayDateKey, refreshRemoteJsonFilesForKeys]);
 
   const onScrape = async () => {
     const dates =
@@ -676,8 +669,8 @@ export function App(): JSX.Element {
                   ))}
                 </ul>
                 <p className="mt-1.5 mb-0 text-[10px] text-[#5c6570]">
-                  Highlight matches &quot;Actions for&quot; selection. Scrape uses
-                  all listed dates in order.
+                  Highlight matches &quot;Actions for&quot; selection. Scrape
+                  uses all listed dates in order.
                 </p>
               </div>
             ) : null}
@@ -807,69 +800,16 @@ export function App(): JSX.Element {
             : "A new Discover tab is opened per date; the scraper configures table view and date range automatically."}
         </p>
 
-        <h3 className="mb-1.5 mt-1 text-xs font-medium text-[#9aa3b2]">
-          JSON files for today (cloud — {todayDateKey})
-        </h3>
-        <p className="mb-2 m-0 text-[11px] text-[#9aa3b2]">
-          {remoteJsonLoading
-            ? "Loading…"
-            : remoteJsonError
-              ? `Error: ${remoteJsonError}`
-              : remoteJsonFiles.length === 0
-                ? "No files for today's date key."
-                : `${remoteJsonFiles.length} file${remoteJsonFiles.length === 1 ? "" : "s"} found.`}
-        </p>
-        {!remoteJsonLoading && !remoteJsonError ? (
-          remoteJsonFiles.length === 0 ? (
-            <div className="mb-3 rounded-lg border border-dashed border-[#2a3140] bg-[#12151c]/80 px-3 py-6 text-center text-[12px] text-[#9aa3b2]">
-              No uploaded JSON files for {todayDateKey}.
-            </div>
-          ) : (
-            <ul className="m-0 mb-3 max-h-[min(220px,40vh)] list-none space-y-1.5 overflow-y-auto p-0 pr-0.5">
-              {remoteJsonFiles.map((f) => {
-                const downloading = remoteJsonDownloadingById[f.id] === true;
-                const deleting = remoteJsonDeletingById[f.id] === true;
-                return (
-                  <li
-                    key={f.id}
-                    className="flex items-center justify-between gap-2 rounded-md border border-[#2a3140] bg-[#12151c] px-2.5 py-2 text-xs"
-                  >
-                    <span className="min-w-0 truncate text-[#e8eaef]">
-                      <span className="text-[#5c6570]"> / </span>
-                      {f.file_path.split("/").pop() ?? f.file_path}
-                      <span className="text-[#9aa3b2]">
-                        {" "}
-                        — {new Date(f.created_at).toLocaleString()}
-                      </span>
-                    </span>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <button
-                        type="button"
-                        className={`${btnBase} px-2 py-2`}
-                        onClick={() => void downloadRemoteJsonFile(f)}
-                        disabled={deleting || downloading}
-                        title={`Download\n${f.file_path}`}
-                        aria-label={`Download ${f.file_path}`}
-                      >
-                        <Download className="h-4 w-4" aria-hidden />
-                      </button>
-                      <button
-                        type="button"
-                        className={`${btnBase} px-2 py-2`}
-                        onClick={() => void deleteRemoteJsonFile(f.id)}
-                        disabled={deleting || downloading}
-                        title="Delete"
-                        aria-label={`Delete ${f.file_path}`}
-                      >
-                        <Trash2 className="h-4 w-4" aria-hidden />
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )
-        ) : null}
+        <JsonFilesList
+          bucketsLabel={remoteCloudBucketsLabel}
+          files={remoteJsonFiles}
+          loading={remoteJsonLoading}
+          error={remoteJsonError}
+          downloadingById={remoteJsonDownloadingById}
+          deletingById={remoteJsonDeletingById}
+          onDownload={downloadRemoteJsonFile}
+          onDelete={deleteRemoteJsonFile}
+        />
       </section>
     </div>
   );

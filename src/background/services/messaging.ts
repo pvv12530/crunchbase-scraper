@@ -21,9 +21,13 @@ export async function handleContentDone(dateKey: string, totalRows: number): Pro
       .sendMessage({ type: 'scrape/complete', dateKey, meta: done } satisfies ExtensionMessage)
       .catch(() => {});
   }
+  const qBefore = await getQueueState();
+  const deferCloudAndFileForBatch =
+    qBefore.multiDateExportSession === true &&
+    Array.isArray(qBefore.batchOrder) &&
+    qBefore.batchOrder.length > 1;
+
   await onScrapeFinished(dateKey);
-  const q = await getQueueState();
-  const deferCloudAndFileForBatch = q.multiDateExportSession === true;
   try {
     await exportMergedJsonFromDateChunks(dateKey, {
       skipDownload: deferCloudAndFileForBatch,

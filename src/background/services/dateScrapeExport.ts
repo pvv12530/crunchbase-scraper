@@ -131,9 +131,8 @@ async function uploadMergedJsonToSupabase(
   built: MergedExportBuilt,
 ): Promise<boolean> {
   try {
-    const uploadDateKey = localDateKey();
     const fd = new FormData();
-    fd.append("date", uploadDateKey);
+    fd.append("date", dateKey);
     if (built.meta.groupId) fd.append("group_id", built.meta.groupId);
     fd.append(
       "file",
@@ -176,8 +175,9 @@ export async function tryDownloadBatchZipIfComplete(): Promise<void> {
   if (q.activeDateKey !== null || q.pending.length > 0) return;
 
   const logKey = order[0] ?? "batch";
+  const uniqueOrder = [...new Set(order)];
   const builtList: { dateKey: string; built: MergedExportBuilt }[] = [];
-  for (const dateKey of order) {
+  for (const dateKey of uniqueOrder) {
     const built = await buildMergedExportForDate(dateKey);
     if (built) builtList.push({ dateKey, built });
   }
@@ -208,7 +208,7 @@ export async function tryDownloadBatchZipIfComplete(): Promise<void> {
     await chrome.runtime
       .sendMessage({
         type: "scrape/jsonArtifactsUpdated",
-        dateKey: localDateKey(),
+        dateKeys: builtList.map((x) => x.dateKey),
       } satisfies ExtensionMessage)
       .catch(() => {});
   }
@@ -225,8 +225,8 @@ export async function tryDownloadBatchZipIfComplete(): Promise<void> {
   }
 
   const zipped = zipSync(entries, { level: 0 });
-  const first = order[0] ?? "start";
-  const last = order[order.length - 1] ?? first;
+  const first = uniqueOrder[0] ?? "start";
+  const last = uniqueOrder[uniqueOrder.length - 1] ?? first;
   const zipName = `crunchbase-scrape-batch-${localDateKey()}_${first}_to_${last}.zip`;
 
   try {
@@ -332,7 +332,7 @@ export async function exportMergedJsonFromDateChunks(
   await chrome.runtime
     .sendMessage({
       type: "scrape/jsonArtifactsUpdated",
-      dateKey,
+      dateKeys: [dateKey],
     } satisfies ExtensionMessage)
     .catch(() => {});
 }

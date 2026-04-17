@@ -51,4 +51,6 @@ export interface ScrapeQueueState {
    * Used to skip per-date JSON downloads and only zip at the end (uploads still run).
    */
   multiDateExportSession: boolean;
+  /** From panel `scrape/start`; applied when clearing run metadata per queued date. */
+  sessionGroupId: string | null;
 }

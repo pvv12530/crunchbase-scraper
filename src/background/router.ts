@@ -229,7 +229,10 @@ export function initMessageRouter(): void {
                 message.dateKeys.length > 0
               ) {
                 // Batch run: enqueue and let background open a fresh tab per date.
-                await scrapeQueue.enqueueFromImport(message.dateKeys);
+                await scrapeQueue.enqueueFromImport(
+                  message.dateKeys,
+                  message.groupId,
+                );
                 await scrapeQueue.tryStartNext();
                 sendResponse({ ok: true });
                 return;
