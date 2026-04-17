@@ -4,7 +4,6 @@ import type { ChunkRef, DateRunMeta } from "@shared/models";
 import { parseCsvDates } from "../lib/csv";
 import * as storage from "../storage";
 import { getActiveTabContext } from "./services/tabContext";
-import { sendScrapeStartToTab } from "./services/jobQueue";
 import {
   handleContentCancelled,
   handleContentDone,
@@ -230,21 +229,9 @@ export function initMessageRouter(): void {
                 Array.isArray(message.dateKeys) &&
                 message.dateKeys.length > 0
               ) {
-                const ctx = await getActiveTabContext();
-                if (!ctx.isCrunchbaseHost || ctx.activeTabId == null) {
-                  sendResponse({
-                    ok: false,
-                    error: "Active tab is not Crunchbase.",
-                  });
-                  return;
-                }
-                // Run a single content-script job that loops all dates.
-                await sendScrapeStartToTab(
-                  message.dateKey,
-                  ctx.activeTabId,
-                  message.dateKeys,
-                  message.groupId,
-                );
+                // Batch run: enqueue and let background open a fresh tab per date.
+                await scrapeQueue.enqueueFromImport(message.dateKeys);
+                await scrapeQueue.tryStartNext();
                 sendResponse({ ok: true });
                 return;
               }

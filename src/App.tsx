@@ -138,10 +138,6 @@ export function App(): JSX.Element {
   const [csvDragOver, setCsvDragOver] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const csvDragDepth = useRef(0);
-  const [tabCtx, setTabCtx] = useState<{ ok: boolean; text: string }>({
-    ok: false,
-    text: "Checking active tab…",
-  });
   const [modeTab, setModeTab] = useState<ModeTab>("calendar");
   const prevModeTab = useRef<ModeTab>(modeTab);
   /** Last successful "Scrape results" snapshot (all paginated rows, all visible columns). */
@@ -215,23 +211,9 @@ export function App(): JSX.Element {
     }
   }, []);
 
-  const refreshTabContext = useCallback(async () => {
-    const ctx = await chrome.runtime.sendMessage({
-      type: "tabContext/get",
-    } satisfies ExtensionMessage);
-    const isCb = ctx?.isCrunchbaseHost === true;
-    setTabCtx({
-      ok: isCb,
-      text: isCb
-        ? "Active tab: Crunchbase — batch scrape can run."
-        : "Active tab is not Crunchbase — open crunchbase.com and the Discover page.",
-    });
-  }, []);
-
   useEffect(() => {
     void loadQueueState();
-    void refreshTabContext();
-  }, [loadQueueState, refreshTabContext]);
+  }, [loadQueueState]);
 
   useEffect(() => {
     const syncToday = () => {
@@ -295,9 +277,6 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     const onMsg = (msg: ExtensionMessage) => {
-      if (msg.type === "tabContext/changed") {
-        void refreshTabContext();
-      }
       if (
         msg.type === "scrape/progress" ||
         msg.type === "scrape/complete" ||
@@ -341,7 +320,7 @@ export function App(): JSX.Element {
     };
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
-  }, [loadQueueState, refreshTabContext]);
+  }, [loadQueueState]);
 
   useEffect(() => {
     if (!isDateKey(todayDateKey)) {
@@ -483,9 +462,8 @@ export function App(): JSX.Element {
     })();
   };
 
-  const isCb = tabCtx.ok;
   const hasValidSelectedDate = isDateKey(selectedDateKey);
-  const scrapeDisabled = !isCb || !hasValidSelectedDate;
+  const scrapeDisabled = !hasValidSelectedDate;
   const selectedQueued = hasValidSelectedDate
     ? (queueState?.pending ?? []).includes(selectedDateKey)
     : false;
@@ -501,10 +479,10 @@ export function App(): JSX.Element {
         <span
           className={[
             "block rounded-lg border border-[#2a3140] bg-[#161a22] px-2.5 py-2 text-xs",
-            isCb ? "text-[#8bd49a]" : "text-[#f0a96e]",
+            "text-[#8bd49a]",
           ].join(" ")}
         >
-          {tabCtx.text}
+          Scrape runs in the current tab (must be on Crunchbase Discover Companies).
         </span>
       </section>
 
@@ -679,11 +657,9 @@ export function App(): JSX.Element {
           </button> */}
         </div>
         <p className="mb-2 text-[11px] text-[#9aa3b2]">
-          {!isCb
-            ? "Switch to a Crunchbase tab to enable scraping."
-            : !hasValidSelectedDate
-              ? "Choose a date on the Calendar tab or select a row from your CSV list."
-              : "Uses filters already visible on the page; set your date column filter on Crunchbase if needed."}
+          {!hasValidSelectedDate
+            ? "Choose a date on the Calendar tab or select a row from your CSV list."
+            : "A new Discover tab is opened per date; the scraper configures table view and date range automatically."}
         </p>
 
         <div className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">

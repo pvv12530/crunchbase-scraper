@@ -27,7 +27,7 @@ const DELAYS = {
   afterMenuOpenMs: 250,
   afterToggleColumnMs: 200,
   afterApplyViewMs: 1000,
-  beforeNextClickMs: 60_000, // IMPORTANT: wait 1 min before clicking Next
+  beforeNextClickMs: 30_000, // IMPORTANT: wait 30_000ms (30 seconds) before clicking Next
   afterNextClickMs: 1600,
   afterApplyFiltersWaitMs: 20_000,
 };
@@ -612,7 +612,13 @@ type CustomAdvancedSearchResponse = {
 
 type PendingSearch = {
   resolve: (v: CustomAdvancedSearchResponse | null) => void;
-  timer: number;
+  timeoutTimer: number;
+  settleTimer: number | null;
+  settleMs: number;
+  last: CustomAdvancedSearchResponse | null;
+  accept:
+    | ((url: string, body: CustomAdvancedSearchResponse["body"]) => boolean)
+    | null;
 };
 const SEARCH_RESULTS_PENDING = new Map<string, PendingSearch>();
 let SEARCH_RESULTS_LISTENER_INSTALLED = false;
@@ -646,18 +652,29 @@ function ensureSearchResultsListenerInstalled(): void {
     const pending = SEARCH_RESULTS_PENDING.get(key);
     if (!pending) return;
 
-    window.clearTimeout(pending.timer);
-    SEARCH_RESULTS_PENDING.delete(key);
-    pending.resolve({
+    // Crunchbase may fire multiple search requests for the same "page" while
+    // filters settle / pagination rewinds. We want the *last* response.
+    const body = msg.body as CustomAdvancedSearchResponse["body"];
+    if (pending.accept && !pending.accept(msg.url, body)) return;
+
+    pending.last = {
       url: msg.url,
-      body: msg.body as CustomAdvancedSearchResponse["body"],
-    });
+      body,
+    };
+    if (pending.settleTimer != null) window.clearTimeout(pending.settleTimer);
+    pending.settleTimer = window.setTimeout(() => {
+      window.clearTimeout(pending.timeoutTimer);
+      SEARCH_RESULTS_PENDING.delete(key);
+      pending.resolve(pending.last);
+    }, pending.settleMs);
   });
 }
 
-async function waitForCustomAdvancedSearchResults(
+async function waitForLastCustomAdvancedSearchResults(
   key: string,
   timeoutMs: number,
+  settleMs: number,
+  accept?: (url: string, body: CustomAdvancedSearchResponse["body"]) => boolean,
   signal?: AbortSignal,
 ): Promise<CustomAdvancedSearchResponse | null> {
   ensureSearchResultsNetworkInterceptorInstalled();
@@ -673,15 +690,34 @@ async function waitForCustomAdvancedSearchResults(
     const cleaned = (key ?? "").trim() || "default";
     const existing = SEARCH_RESULTS_PENDING.get(cleaned);
     if (existing) {
-      window.clearTimeout(existing.timer);
+      window.clearTimeout(existing.timeoutTimer);
+      if (existing.settleTimer != null)
+        window.clearTimeout(existing.settleTimer);
       SEARCH_RESULTS_PENDING.delete(cleaned);
     }
     const t = window.setTimeout(() => {
       SEARCH_RESULTS_PENDING.delete(cleaned);
       resolve(null);
     }, timeoutMs);
-    SEARCH_RESULTS_PENDING.set(cleaned, { resolve, timer: t });
+    SEARCH_RESULTS_PENDING.set(cleaned, {
+      resolve,
+      timeoutTimer: t,
+      settleTimer: null,
+      settleMs: Math.max(250, settleMs),
+      last: null,
+      accept: accept ?? null,
+    });
   });
+}
+
+function urlHasAfterId(url: string): boolean {
+  try {
+    const u = new URL(url, window.location.origin);
+    return u.searchParams.has("after_id") || u.searchParams.has("afterId");
+  } catch {
+    // If we can't parse it, do not treat as page-1 clean.
+    return true;
+  }
 }
 
 type DateRangeRun = {
@@ -743,21 +779,6 @@ export async function runDiscoverScrape(
   let didConfigureView = false;
   let totalRows = 0;
 
-  // IMPORTANT: configure table view first (per user request).
-  // This relies on the results header being rendered.
-  try {
-    await configureResultsTableView(
-      TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
-      log,
-      signal,
-    );
-    didConfigureView = true;
-  } catch (e) {
-    await log(
-      `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-
   for (const r of ranges) {
     let totalRowsForDate = 0;
     if (signal?.aborted) {
@@ -766,6 +787,36 @@ export async function runDiscoverScrape(
       throw err;
     }
 
+    await log("Waiting for results table…");
+    try {
+      await waitForResultsRoot(20_000, signal);
+      await log("Results visible.");
+    } catch {
+      await log("Results table not detected yet (continuing).");
+    }
+
+    const maxPages = 500;
+
+    // Step 1 (new requirement): rewind pagination FIRST (Prev until disabled).
+    await rewindResultsToFirstPage(log, signal, maxPages);
+
+    // Step 2: configure table view after rewinding to page 1.
+    if (!didConfigureView) {
+      try {
+        await configureResultsTableView(
+          TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
+          log,
+          signal,
+        );
+        didConfigureView = true;
+      } catch (e) {
+        await log(
+          `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+
+    // Step 3: fill start/end date (apply filter).
     await log(`Applying date range ${r.startDate} → ${r.endDate}…`);
     applyDateHint(r.runKey);
 
@@ -790,43 +841,19 @@ export async function runDiscoverScrape(
       await log("Could not find Financials filter-group button (continuing).");
     }
 
-    // Start waiting for the first page API response as early as possible, so we
-    // don't miss the response that fires immediately after applying the date filter.
-    const firstWait = waitForCustomAdvancedSearchResults(
+    // IMPORTANT (new requirement): only start capturing search API responses
+    // AFTER the start/end date inputs are filled (ignore earlier calls).
+    // Page 1 must be a "no afterId" call (true first page after rewinding).
+    const firstWait = waitForLastCustomAdvancedSearchResults(
       `${r.runKey}/page-1`,
       90_000,
+      1250,
+      (url) => !urlHasAfterId(url),
       signal,
     );
 
     await log("Waiting 10s for results to reload after date change…");
     await sleep(DELAYS.afterDatesResultsLoadMs);
-
-    if (!didConfigureView) {
-      // If configuration earlier failed (or results weren't visible yet), retry once after filters.
-      try {
-        await configureResultsTableView(
-          TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
-          log,
-          signal,
-        );
-        didConfigureView = true;
-      } catch (e) {
-        await log(
-          `Table view configuration failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-    }
-
-    await log("Waiting for results table…");
-    try {
-      await waitForResultsRoot(20_000, signal);
-      await log("Results visible. Starting scrape…");
-    } catch {
-      await log("Results table not detected yet (continuing).");
-    }
-
-    const maxPages = 500;
-    await rewindResultsToFirstPage(log, signal, maxPages);
 
     // Scrape by capturing Crunchbase search API responses only.
     let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null =
@@ -845,9 +872,11 @@ export async function runDiscoverScrape(
               return await firstWait;
             })()
           : await (nextPageWait ??
-              waitForCustomAdvancedSearchResults(
+              waitForLastCustomAdvancedSearchResults(
                 `${r.runKey}/page-${pageIndex + 1}`,
                 90_000,
+                1250,
+                undefined,
                 signal,
               ));
       if (!captured) {
@@ -911,9 +940,11 @@ export async function runDiscoverScrape(
 
       // Trigger loading next page (Crunchbase will call the same API again).
       // Create the pending slot BEFORE clicking Next so we don't miss fast responses.
-      nextPageWait = waitForCustomAdvancedSearchResults(
+      nextPageWait = waitForLastCustomAdvancedSearchResults(
         `${r.runKey}/page-${pageIndex + 2}`,
         90_000,
+        1250,
+        undefined,
         signal,
       );
       await log("Waiting 60s before clicking Next…");
@@ -959,9 +990,11 @@ export async function runDiscoverScrapeCurrentResults(
   await log("Waiting 10s for results to load…");
   await sleep(DELAYS.afterDatesResultsLoadMs);
 
-  const firstWait = waitForCustomAdvancedSearchResults(
+  const firstWait = waitForLastCustomAdvancedSearchResults(
     `${runKey}/page-1`,
     90_000,
+    1250,
+    (url) => !urlHasAfterId(url),
     signal,
   );
   await rewindResultsToFirstPage(log, signal, maxPages);
@@ -978,9 +1011,11 @@ export async function runDiscoverScrapeCurrentResults(
       pageIndex === 0
         ? await firstWait
         : await (nextPageWait ??
-            waitForCustomAdvancedSearchResults(
+            waitForLastCustomAdvancedSearchResults(
               `${runKey}/page-${pageIndex + 1}`,
               90_000,
+              1250,
+              undefined,
               signal,
             ));
     if (!captured) {
@@ -1040,9 +1075,11 @@ export async function runDiscoverScrapeCurrentResults(
       break;
     }
 
-    nextPageWait = waitForCustomAdvancedSearchResults(
+    nextPageWait = waitForLastCustomAdvancedSearchResults(
       `${runKey}/page-${pageIndex + 2}`,
       90_000,
+      1250,
+      undefined,
       signal,
     );
     await log("Waiting 60s before clicking Next…");

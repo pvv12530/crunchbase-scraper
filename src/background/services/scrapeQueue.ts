@@ -6,6 +6,7 @@ import { getActiveTabContext } from './activeTab';
 import { sendScrapeStartToTab } from './jobQueue';
 
 const STORAGE_KEY = 'scrapeQueueV1';
+const DISCOVER_COMPANIES_PATH_PREFIX = '/discover/organization.companies';
 
 let mem: ScrapeQueueState = {
   pending: [],
@@ -14,6 +15,29 @@ let mem: ScrapeQueueState = {
   batchOrder: null,
 };
 let loaded = false;
+
+// Internal runtime-only state; not persisted.
+let activeRunTabId: number | null = null;
+
+function emitUiLog(dateKey: string, text: string): void {
+  chrome.runtime
+    .sendMessage({
+      type: 'scrape/log',
+      dateKey,
+      level: 'info',
+      text,
+      at: new Date().toISOString(),
+    } satisfies ExtensionMessage)
+    .catch(() => {});
+}
+
+function formatMs(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}m ${String(rem).padStart(2, '0')}s`;
+}
 
 async function load(): Promise<void> {
   if (loaded) return;
@@ -96,13 +120,118 @@ export async function requestStopCurrent(): Promise<void> {
 }
 
 async function requestAbortActiveTab(): Promise<void> {
-  const ctx = await getActiveTabContext();
-  if (ctx.activeTabId == null) return;
+  if (activeRunTabId == null) return;
   await chrome.tabs
-    .sendMessage(ctx.activeTabId, {
+    .sendMessage(activeRunTabId, {
       type: 'scrape/abort',
     } satisfies ExtensionMessage)
     .catch(() => {});
+}
+
+async function assertActiveTabIsDiscoverCompanies(
+  dateKeyForLog: string,
+): Promise<number> {
+  const ctx = await getActiveTabContext();
+  if (ctx.activeTabId == null) throw new Error('No active tab found');
+  const tabId = ctx.activeTabId;
+  const activeUrl = ctx.activeUrl ?? '';
+  emitUiLog(dateKeyForLog, `Active tab ${tabId} URL=${activeUrl || '(unknown)'}`);
+  if (!activeUrl) {
+    throw new Error(
+      `Active tab has no URL. Open Crunchbase: https://www.crunchbase.com${DISCOVER_COMPANIES_PATH_PREFIX}`,
+    );
+  }
+  let u: URL;
+  try {
+    u = new URL(activeUrl);
+  } catch {
+    throw new Error(
+      `Active tab URL is invalid: ${activeUrl}. Open Crunchbase: https://www.crunchbase.com${DISCOVER_COMPANIES_PATH_PREFIX}`,
+    );
+  }
+  if (
+    u.hostname !== 'www.crunchbase.com' &&
+    u.hostname !== 'crunchbase.com'
+  ) {
+    throw new Error(
+      `Active tab is not Crunchbase (${u.hostname}). Open: https://www.crunchbase.com${DISCOVER_COMPANIES_PATH_PREFIX}`,
+    );
+  }
+  if (!u.pathname.startsWith(DISCOVER_COMPANIES_PATH_PREFIX)) {
+    throw new Error(
+      `Active tab is not Discover Companies (${u.pathname}). Open: https://www.crunchbase.com${DISCOVER_COMPANIES_PATH_PREFIX}`,
+    );
+  }
+  return tabId;
+}
+
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise((r) => window.setTimeout(r, ms));
+}
+
+async function sleepWithProgress(
+  dateKey: string,
+  totalMs: number,
+  tickMs: number,
+): Promise<void> {
+  const started = Date.now();
+  let lastRemaining = totalMs;
+  emitUiLog(dateKey, `Wait: ${formatMs(totalMs)} remaining…`);
+  while (Date.now() - started < totalMs) {
+    const elapsed = Date.now() - started;
+    const remaining = Math.max(0, totalMs - elapsed);
+    // Only log when we cross a tick boundary (avoid spam).
+    if (
+      remaining <= 0 ||
+      Math.floor(remaining / tickMs) !== Math.floor(lastRemaining / tickMs)
+    ) {
+      emitUiLog(dateKey, `Wait: ${formatMs(remaining)} remaining…`);
+      lastRemaining = remaining;
+    }
+    await sleepMs(Math.min(750, remaining));
+  }
+}
+
+async function sendScrapeStartWithRetries(
+  dateKey: string,
+  tabId: number,
+): Promise<void> {
+  let lastErr: unknown = null;
+  let didInject = false;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      emitUiLog(
+        dateKey,
+        attempt === 0
+          ? 'Starting scrape…'
+          : `Starting scrape (retry ${attempt + 1}/12)…`,
+      );
+      await sendScrapeStartToTab(dateKey, tabId);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      emitUiLog(dateKey, `Scrape start not ready yet: ${msg}`);
+
+      // If the content script isn't injected/ready after redirect, inject it once as fallback.
+      if (!didInject) {
+        didInject = true;
+        emitUiLog(dateKey, 'Injecting Crunchbase content script (fallback)…');
+        await chrome.scripting
+          .executeScript({
+            target: { tabId },
+            files: ['content/crunchbase.js'],
+          })
+          .catch(() => {});
+      }
+
+      // Content script may not be ready yet right after load; back off.
+      await new Promise((r) => window.setTimeout(r, 500 + attempt * 250));
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(`Failed to start scrape: ${String(lastErr)}`);
 }
 
 export async function tryStartNext(): Promise<void> {
@@ -110,18 +239,19 @@ export async function tryStartNext(): Promise<void> {
   if (mem.activeDateKey !== null) return;
   if (mem.pending.length === 0) return;
 
-  const ctx = await getActiveTabContext();
-  if (!ctx.isCrunchbaseHost || ctx.activeTabId == null) return;
-
   const dateKey = mem.pending.shift()!;
   mem.activeDateKey = dateKey;
   await broadcastQueue();
 
   try {
-    await sendScrapeStartToTab(dateKey, ctx.activeTabId);
+    // Only run if the *current tab* is already on Discover Companies.
+    const tabId = await assertActiveTabIsDiscoverCompanies(dateKey);
+    activeRunTabId = tabId;
+    await sendScrapeStartWithRetries(dateKey, tabId);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     mem.activeDateKey = null;
+    activeRunTabId = null;
     await broadcastQueue();
     const meta = await storage.ensureRun(dateKey, SOURCE_CRUNCHBASE_DISCOVER_ORGS);
     await storage.upsertRun({
@@ -152,6 +282,9 @@ export async function onScrapeFinished(dateKey: string): Promise<void> {
     return;
   }
   mem.activeDateKey = null;
+  // Do not close the tab; we reuse the current tab across dates.
+  activeRunTabId = null;
+
   if (mem.stagedAfterAbort !== null) {
     mem.pending = [...mem.stagedAfterAbort];
     mem.batchOrder = [...mem.stagedAfterAbort];

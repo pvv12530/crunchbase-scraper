@@ -3,6 +3,17 @@ import { runDiscoverScrape, runDiscoverScrapeCurrentResults } from './discoverAd
 
 let abortCurrent: (() => void) | null = null;
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __crunchbaseDateBatchContentInstalled: boolean | undefined;
+}
+
+if (globalThis.__crunchbaseDateBatchContentInstalled) {
+  // Prevent duplicate listeners if the script is injected multiple times.
+  // (We rely on this for robustness after tab redirects.)
+} else {
+  globalThis.__crunchbaseDateBatchContentInstalled = true;
+
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   if (message.type === 'scrape/abort') {
     abortCurrent?.();
@@ -127,3 +138,5 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
 
   return true;
 });
+
+}
