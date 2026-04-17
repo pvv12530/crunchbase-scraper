@@ -168,8 +168,7 @@ export function App(): JSX.Element {
   const [logScrollMoreVisible, setLogScrollMoreVisible] = useState(false);
 
   const updateLogScrollUi = useCallback((el: HTMLUListElement) => {
-    const atBottom =
-      el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
     logStickToEndRef.current = atBottom;
     const canScroll = el.scrollHeight > el.clientHeight + 2;
     setLogScrollMoreVisible(canScroll && !atBottom);
@@ -311,21 +310,21 @@ export function App(): JSX.Element {
             : msg.text;
         setLogsByDate((prev) => {
           const cur = prev[bucket] ?? [];
-          const next = [
-            ...cur,
-            { at: msg.at, level: msg.level, text },
-          ].slice(-LOGS_MAX_PER_DATE);
+          const next = [...cur, { at: msg.at, level: msg.level, text }].slice(
+            -LOGS_MAX_PER_DATE,
+          );
           return { ...prev, [bucket]: next };
         });
       }
       if (msg.type === "scrape/jsonArtifactsUpdated") {
-        const dk = msg.dateKey;
-        if (!isDateKey(dk) || dk !== localDateKey()) return;
+        // Supabase uploads use today's file_date; always refresh that list.
+        const bucket = localDateKey();
+        if (!isDateKey(bucket)) return;
         setRemoteJsonLoading(true);
         setRemoteJsonError("");
         void (async () => {
           try {
-            const files = await fetchJsonFilesByDate(dk);
+            const files = await fetchJsonFilesByDate(bucket);
             setRemoteJsonFiles(files);
           } catch (e) {
             setRemoteJsonFiles([]);
@@ -437,28 +436,29 @@ export function App(): JSX.Element {
     });
   };
 
-  const applyCsvText = useCallback(
-    async (text: string) => {
-      const res = (await chrome.runtime.sendMessage({
-        type: "import/csv",
-        text,
-      } satisfies ExtensionMessage)) as { dates?: string[]; error?: string };
-      if (res.error) {
-        setCsvHint(res.error);
-        return;
-      }
-      const dates = res.dates ?? [];
-      setImportedDateOrder(dates);
-      if (dates.length > 0) {
-        const first = dates[0];
-        if (first) setSelectedDateKey(first);
-      }
-      setSelectedDateKeys(dates);
-      setModeTab("csv");
-      void loadQueueState();
-    },
-    [loadQueueState],
-  );
+  const applyCsvText = useCallback(async (text: string) => {
+    const res = (await chrome.runtime.sendMessage({
+      type: "import/csv",
+      text,
+    } satisfies ExtensionMessage)) as { dates?: string[]; error?: string };
+    if (res.error) {
+      setCsvHint(res.error);
+      return;
+    }
+    const dates = res.dates ?? [];
+    setImportedDateOrder(dates);
+    if (dates.length > 0) {
+      const first = dates[0];
+      if (first) setSelectedDateKey(first);
+      setCsvHint(
+        `Imported ${dates.length} date${dates.length === 1 ? "" : "s"} from CSV (not queued — click Scrape to run).`,
+      );
+    } else {
+      setCsvHint("No dates found in CSV.");
+    }
+    setSelectedDateKeys(dates);
+    setModeTab("csv");
+  }, []);
 
   const onCsvInputChange = async (ev: React.ChangeEvent<HTMLInputElement>) => {
     const file = ev.target.files?.[0];
@@ -534,7 +534,8 @@ export function App(): JSX.Element {
             "text-[#8bd49a]",
           ].join(" ")}
         >
-          Scrape runs in the current tab (must be on Crunchbase Discover Companies).
+          Scrape runs in the current tab (must be on Crunchbase Discover
+          Companies).
         </span>
       </section>
 
@@ -651,14 +652,40 @@ export function App(): JSX.Element {
                 {csvHint}
               </p>
             ) : null}
+            {importedDateOrder.length > 0 ? (
+              <div className="mt-3">
+                <h3 className="mb-1.5 text-xs font-medium text-[#9aa3b2]">
+                  Dates in file ({importedDateOrder.length})
+                </h3>
+                <ul className="m-0 max-h-[min(200px,32vh)] list-none space-y-1 overflow-y-auto rounded-md border border-[#2a3140]/70 bg-[#12151c]/60 p-2 font-mono text-[11px] text-[#b8c0cc]">
+                  {importedDateOrder.map((dk) => (
+                    <li key={dk}>
+                      <button
+                        type="button"
+                        className={[
+                          "w-full rounded px-1.5 py-0.5 text-left transition-colors",
+                          dk === selectedDateKey
+                            ? "bg-[#4c8bf5]/20 text-[#e8eaef]"
+                            : "text-[#b8c0cc] hover:bg-[#2a3140]/80 hover:text-[#e8eaef]",
+                        ].join(" ")}
+                        onClick={() => setSelectedDateKey(dk)}
+                      >
+                        {dk}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1.5 mb-0 text-[10px] text-[#5c6570]">
+                  Highlight matches &quot;Actions for&quot; selection. Scrape uses
+                  all listed dates in order.
+                </p>
+              </div>
+            ) : null}
           </section>
         </>
       )}
 
-      <section
-        id="detailPanel"
-        className="flex min-h-0 flex-1 flex-col"
-      >
+      <section id="detailPanel" className="flex min-h-0 flex-1 flex-col">
         <h2 id="detailTitle" className="mb-2 text-sm font-medium">
           Actions for {selectedDateKey || "—"}
         </h2>
@@ -675,7 +702,7 @@ export function App(): JSX.Element {
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4c8bf5] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
               "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none",
             ].join(" ")}
-            disabled={scrapeDisabled || selectedScrapeBusy}
+            disabled={scrapeDisabled || anyRunning || selectedScrapeBusy}
             onClick={() => void onScrape()}
           >
             {anyRunning ? (
@@ -729,8 +756,7 @@ export function App(): JSX.Element {
           {todayLogs.length === 0 ? (
             <p className="m-0 text-[11px] text-[#9aa3b2]">
               No log lines yet for today. Scrapes for any selected date append
-              here; lines from other dates are prefixed{" "}
-              <span className="font-mono text-[#b8c0cc]">[YYYY-MM-DD]</span>.
+              here;
             </p>
           ) : (
             <div className="relative">
@@ -784,11 +810,6 @@ export function App(): JSX.Element {
         <h3 className="mb-1.5 mt-1 text-xs font-medium text-[#9aa3b2]">
           JSON files for today (cloud — {todayDateKey})
         </h3>
-        <p className="mb-1 m-0 text-[11px] text-[#9aa3b2]">
-          Cloud files use <span className="font-mono text-[#b8c0cc]">file_date</span>{" "}
-          = today ({todayDateKey}). Scrapes for other dates upload under those
-          dates, not here.
-        </p>
         <p className="mb-2 m-0 text-[11px] text-[#9aa3b2]">
           {remoteJsonLoading
             ? "Loading…"
@@ -848,7 +869,7 @@ export function App(): JSX.Element {
               })}
             </ul>
           )
-               ) : null}
+        ) : null}
       </section>
     </div>
   );

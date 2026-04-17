@@ -1,6 +1,9 @@
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
+import type { DateRunMeta } from "@shared/models";
+import { zipSync } from "fflate";
 import * as storage from "../../storage";
+import * as scrapeQueue from "./scrapeQueue";
 
 const SUPABASE_FN_UPLOAD_JSON =
   "https://gfxknuxbtkhomfodrrfr.supabase.co/functions/v1/upload-json";
@@ -54,6 +57,19 @@ function jsonTextToDownloadsDataUrl(jsonText: string): string {
   return `data:application/json;base64,${b64}`;
 }
 
+function uint8ToDownloadsDataUrl(bytes: Uint8Array, mime: string): string {
+  const chunk = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunk) {
+    const sub = bytes.subarray(i, Math.min(i + chunk, bytes.length));
+    let s = "";
+    for (let j = 0; j < sub.length; j++) s += String.fromCharCode(sub[j]!);
+    parts.push(s);
+  }
+  const b64 = btoa(parts.join(""));
+  return `data:${mime};base64,${b64}`;
+}
+
 async function emitLog(
   dateKey: string,
   level: "info" | "warn" | "error",
@@ -70,25 +86,21 @@ async function emitLog(
     .catch(() => {});
 }
 
-/**
- * Rebuilds one entities JSON from all DOM-grid chunks saved during `runDiscoverScrape`
- * (same shape as manual "Scrape results"), then downloads it and uploads to Supabase.
- */
-export async function exportMergedJsonFromDateChunks(
+type MergedExportBuilt = {
+  jsonText: string;
+  filename: string;
+  totalRows: number;
+  meta: DateRunMeta;
+};
+
+async function buildMergedExportForDate(
   dateKey: string,
-): Promise<void> {
+): Promise<MergedExportBuilt | null> {
   const meta = await storage.getRun(dateKey);
-  if (!meta || meta.sourceId !== SOURCE_CRUNCHBASE_DISCOVER_ORGS) return;
+  if (!meta || meta.sourceId !== SOURCE_CRUNCHBASE_DISCOVER_ORGS) return null;
 
   const refs = [...meta.chunks].sort((a, b) => a.pageIndex - b.pageIndex);
-  if (refs.length === 0) {
-    await emitLog(
-      dateKey,
-      "info",
-      "No saved page chunks — skipped merged JSON export.",
-    );
-    return;
-  }
+  if (refs.length === 0) return null;
 
   const merged: Record<string, unknown>[] = [];
   const seen = new Set<string>();
@@ -105,49 +117,28 @@ export async function exportMergedJsonFromDateChunks(
     }
   }
 
-  if (merged.length === 0) {
-    await emitLog(
-      dateKey,
-      "info",
-      "No rows in saved chunks — skipped merged JSON export.",
-    );
-    return;
-  }
+  if (merged.length === 0) return null;
 
   const totalRows = merged.length;
   const body = { entities: merged, count: totalRows };
   const jsonText = JSON.stringify(body, null, 2);
   const filename = `crunchbase-scrape-results-${dateKey}.json`;
+  return { jsonText, filename, totalRows, meta };
+}
 
-  let downloadOk = false;
-  try {
-    const dataUrl = jsonTextToDownloadsDataUrl(jsonText);
-    await chrome.downloads.download({
-      url: dataUrl,
-      filename,
-      saveAs: false,
-    });
-    downloadOk = true;
-  } catch (e) {
-    await emitLog(
-      dateKey,
-      "warn",
-      `Merged JSON download failed: ${e instanceof Error ? e.message : String(e)} (cloud upload will still run).`,
-    );
-  }
-
-  let uploadOk = false;
+async function uploadMergedJsonToSupabase(
+  dateKey: string,
+  built: MergedExportBuilt,
+): Promise<boolean> {
   try {
     const uploadDateKey = localDateKey();
     const fd = new FormData();
-    // Store uploads under *today* so the UI "JSON files for today" panel always shows them.
-    // (Scraped date is still encoded in the filename.)
     fd.append("date", uploadDateKey);
-    if (meta.groupId) fd.append("group_id", meta.groupId);
+    if (built.meta.groupId) fd.append("group_id", built.meta.groupId);
     fd.append(
       "file",
-      new Blob([jsonText], { type: "application/json" }),
-      filename,
+      new Blob([built.jsonText], { type: "application/json" }),
+      built.filename,
     );
     const res = await fetch(SUPABASE_FN_UPLOAD_JSON, {
       method: "POST",
@@ -157,23 +148,181 @@ export async function exportMergedJsonFromDateChunks(
       await emitLog(
         dateKey,
         "warn",
-        `Merged JSON upload failed (${res.status}).${downloadOk ? " Local file was saved." : ""}`,
+        `Merged JSON upload failed (${res.status}): ${built.filename}`,
       );
-      return;
+      return false;
     }
-    uploadOk = true;
+    return true;
   } catch (e) {
     await emitLog(
       dateKey,
       "warn",
-      `Merged JSON upload failed: ${e instanceof Error ? e.message : String(e)}`,
+      `Merged JSON upload failed: ${e instanceof Error ? e.message : String(e)} (${built.filename})`,
     );
+    return false;
+  }
+}
+
+/**
+ * When multiple dates were queued (calendar multi-select or CSV), per-date export
+ * skips download and cloud; when the queue is idle, this uploads every merged JSON
+ * to Supabase, then downloads one zip of all of them.
+ */
+export async function tryDownloadBatchZipIfComplete(): Promise<void> {
+  const q = await scrapeQueue.getQueueState();
+  if (!q.multiDateExportSession) return;
+  const order = q.batchOrder;
+  if (!order || order.length < 2) return;
+  if (q.activeDateKey !== null || q.pending.length > 0) return;
+
+  const logKey = order[0] ?? "batch";
+  const builtList: { dateKey: string; built: MergedExportBuilt }[] = [];
+  for (const dateKey of order) {
+    const built = await buildMergedExportForDate(dateKey);
+    if (built) builtList.push({ dateKey, built });
+  }
+
+  if (builtList.length === 0) {
+    await emitLog(
+      logKey,
+      "warn",
+      "Batch finished but no merged JSON files were available (skipped cloud + zip).",
+    );
+    await scrapeQueue.clearBatchOrder();
+    return;
+  }
+
+  await emitLog(
+    logKey,
+    "info",
+    `Batch: uploading ${builtList.length} JSON file(s) to Supabase…`,
+  );
+
+   let uploadOk = 0;
+  for (const { dateKey, built } of builtList) {
+    const ok = await uploadMergedJsonToSupabase(dateKey, built);
+    if (ok) uploadOk += 1;
+  }
+
+  if (uploadOk > 0) {
+    await chrome.runtime
+      .sendMessage({
+        type: "scrape/jsonArtifactsUpdated",
+        dateKey: localDateKey(),
+      } satisfies ExtensionMessage)
+      .catch(() => {});
+  }
+
+  await emitLog(
+    logKey,
+    uploadOk === builtList.length ? "info" : "warn",
+    `Batch: cloud upload finished (${uploadOk}/${builtList.length} ok). Downloading zip…`,
+  );
+
+  const entries: Record<string, Uint8Array> = {};
+  for (const { built } of builtList) {
+    entries[built.filename] = new TextEncoder().encode(built.jsonText);
+  }
+
+  const zipped = zipSync(entries, { level: 0 });
+  const first = order[0] ?? "start";
+  const last = order[order.length - 1] ?? first;
+  const zipName = `crunchbase-scrape-batch-${localDateKey()}_${first}_to_${last}.zip`;
+
+  try {
+    const dataUrl = uint8ToDownloadsDataUrl(zipped, "application/zip");
+    await chrome.downloads.download({
+      url: dataUrl,
+      filename: zipName,
+      saveAs: false,
+    });
+    await emitLog(
+      logKey,
+      "info",
+      `Batch download: ${zipName} (${Object.keys(entries).length} JSON file(s)).`,
+    );
+  } catch (e) {
+    await emitLog(
+      logKey,
+      "warn",
+      `Batch zip download failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  } finally {
+    await scrapeQueue.clearBatchOrder();
+  }
+}
+
+/**
+ * Rebuilds one entities JSON from all DOM-grid chunks saved during `runDiscoverScrape`
+ * (same shape as manual "Scrape results"), then downloads it and uploads to Supabase.
+ */
+export async function exportMergedJsonFromDateChunks(
+  dateKey: string,
+  opts?: { skipDownload?: boolean; skipUpload?: boolean },
+): Promise<void> {
+  const meta = await storage.getRun(dateKey);
+  if (!meta || meta.sourceId !== SOURCE_CRUNCHBASE_DISCOVER_ORGS) return;
+  if (meta.chunks.length === 0) {
+    await emitLog(
+      dateKey,
+      "info",
+      "No saved page chunks — skipped merged JSON export.",
+    );
+    return;
+  }
+
+  const built = await buildMergedExportForDate(dateKey);
+  if (!built) {
+    await emitLog(
+      dateKey,
+      "info",
+      "No rows in saved chunks — skipped merged JSON export.",
+    );
+    return;
+  }
+
+  const { jsonText, filename, totalRows } = built;
+
+  if (opts?.skipDownload && opts?.skipUpload) {
+    await emitLog(
+      dateKey,
+      "info",
+      `Merged ${totalRows} row${totalRows === 1 ? "" : "s"} from saved pages → ${filename} (batch: cloud + zip when batch completes).`,
+    );
+    return;
+  }
+
+  let downloadOk = false;
+  if (!opts?.skipDownload) {
+    try {
+      const dataUrl = jsonTextToDownloadsDataUrl(jsonText);
+      await chrome.downloads.download({
+        url: dataUrl,
+        filename,
+        saveAs: false,
+      });
+      downloadOk = true;
+    } catch (e) {
+      await emitLog(
+        dateKey,
+        "warn",
+        `Merged JSON download failed: ${e instanceof Error ? e.message : String(e)} (cloud upload will still run).`,
+      );
+    }
+  }
+
+  if (opts?.skipUpload) {
+    return;
+  }
+
+  const uploaded = await uploadMergedJsonToSupabase(dateKey, built);
+  if (!uploaded) {
     return;
   }
 
   const parts: string[] = [];
   if (downloadOk) parts.push("download");
-  if (uploadOk) parts.push("cloud");
+  parts.push("cloud");
   await emitLog(
     dateKey,
     "info",

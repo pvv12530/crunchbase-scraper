@@ -33,7 +33,6 @@ async function handleImportCsv(
 ): Promise<{ dates: string[]; error?: string }> {
   try {
     const dates = parseCsvDates(text);
-    await scrapeQueue.enqueueFromImport(dates);
     return { dates };
   } catch (e) {
     return { dates: [], error: e instanceof Error ? e.message : String(e) };

@@ -46,4 +46,9 @@ export interface ScrapeQueueState {
   stagedAfterAbort: string[] | null;
   /** Full CSV order for UI; survives reload while a batch exists. */
   batchOrder: string[] | null;
+  /**
+   * True when the user started this run with 2+ dates (multi calendar or CSV).
+   * Used to skip per-date JSON downloads and only zip at the end (uploads still run).
+   */
+  multiDateExportSession: boolean;
 }

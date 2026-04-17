@@ -1,8 +1,11 @@
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from '@shared/constants';
 import type { ExtensionMessage } from '@shared/messages';
 import * as storage from '../../storage';
-import { exportMergedJsonFromDateChunks } from './dateScrapeExport';
-import { onScrapeFinished } from './scrapeQueue';
+import {
+  exportMergedJsonFromDateChunks,
+  tryDownloadBatchZipIfComplete,
+} from './dateScrapeExport';
+import { getQueueState, onScrapeFinished } from './scrapeQueue';
 
 export async function handleContentDone(dateKey: string, totalRows: number): Promise<void> {
   const meta = await storage.ensureRun(dateKey, SOURCE_CRUNCHBASE_DISCOVER_ORGS);
@@ -19,7 +22,16 @@ export async function handleContentDone(dateKey: string, totalRows: number): Pro
       .catch(() => {});
   }
   await onScrapeFinished(dateKey);
-  void exportMergedJsonFromDateChunks(dateKey).catch(() => {});
+  const q = await getQueueState();
+  const deferCloudAndFileForBatch = q.multiDateExportSession === true;
+  try {
+    await exportMergedJsonFromDateChunks(dateKey, {
+      skipDownload: deferCloudAndFileForBatch,
+      skipUpload: deferCloudAndFileForBatch,
+    });
+  } finally {
+    await tryDownloadBatchZipIfComplete();
+  }
 }
 
 export async function handleContentError(dateKey: string, message: string, partial: boolean): Promise<void> {
@@ -34,6 +46,7 @@ export async function handleContentError(dateKey: string, message: string, parti
     .sendMessage({ type: 'scrape/error', dateKey, message, partial } satisfies ExtensionMessage)
     .catch(() => {});
   await onScrapeFinished(dateKey);
+  await tryDownloadBatchZipIfComplete();
 }
 
 export async function handleContentCancelled(dateKey: string, message: string, partial: boolean): Promise<void> {
@@ -48,4 +61,5 @@ export async function handleContentCancelled(dateKey: string, message: string, p
     .sendMessage({ type: 'scrape/error', dateKey, message, partial } satisfies ExtensionMessage)
     .catch(() => {});
   await onScrapeFinished(dateKey);
+  await tryDownloadBatchZipIfComplete();
 }

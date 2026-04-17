@@ -13,6 +13,7 @@ let mem: ScrapeQueueState = {
   activeDateKey: null,
   stagedAfterAbort: null,
   batchOrder: null,
+  multiDateExportSession: false,
 };
 let loaded = false;
 
@@ -51,6 +52,7 @@ async function load(): Promise<void> {
         ? [...raw.stagedAfterAbort]
         : null,
       batchOrder: raw.batchOrder ? [...raw.batchOrder] : null,
+      multiDateExportSession: raw.multiDateExportSession === true,
     };
   }
   loaded = true;
@@ -70,6 +72,7 @@ export async function getQueueState(): Promise<ScrapeQueueState> {
     activeDateKey: mem.activeDateKey,
     stagedAfterAbort: mem.stagedAfterAbort ? [...mem.stagedAfterAbort] : null,
     batchOrder: mem.batchOrder ? [...mem.batchOrder] : null,
+    multiDateExportSession: mem.multiDateExportSession,
   };
 }
 
@@ -77,9 +80,11 @@ export async function getQueueState(): Promise<ScrapeQueueState> {
 export async function enqueueFromImport(dates: string[]): Promise<void> {
   await load();
   const next = [...dates];
+  const multi = next.length > 1;
   if (mem.activeDateKey !== null) {
     mem.stagedAfterAbort = next;
     mem.batchOrder = [...next];
+    mem.multiDateExportSession = multi;
     await save();
     await requestAbortActiveTab();
     return;
@@ -87,12 +92,16 @@ export async function enqueueFromImport(dates: string[]): Promise<void> {
   mem.pending = next;
   mem.batchOrder = [...next];
   mem.stagedAfterAbort = null;
+  mem.multiDateExportSession = multi;
   await save();
 }
 
 /** User retry or manual scrape: prefer this date next (after current job if any). */
 export async function enqueueRetry(dateKey: string): Promise<void> {
   await load();
+  // Single-date flow: do not keep a multi-date batchOrder from a prior CSV / multi-select run.
+  mem.batchOrder = null;
+  mem.multiDateExportSession = false;
   const i = mem.pending.indexOf(dateKey);
   if (i >= 0) mem.pending.splice(i, 1);
   mem.pending.unshift(dateKey);
@@ -100,11 +109,22 @@ export async function enqueueRetry(dateKey: string): Promise<void> {
   await tryStartNext();
 }
 
+/** Clears batch tracking after a multi-date zip download (or empty batch). */
+export async function clearBatchOrder(): Promise<void> {
+  await load();
+  const hadBatch = mem.batchOrder !== null;
+  const hadMulti = mem.multiDateExportSession;
+  if (hadBatch) mem.batchOrder = null;
+  if (hadMulti) mem.multiDateExportSession = false;
+  if (hadBatch || hadMulti) await save();
+}
+
 export async function clearPendingQueue(): Promise<void> {
   await load();
   mem.pending = [];
   mem.stagedAfterAbort = null;
   mem.batchOrder = null;
+  mem.multiDateExportSession = false;
   await save();
   if (mem.activeDateKey !== null) {
     await requestAbortActiveTab();
