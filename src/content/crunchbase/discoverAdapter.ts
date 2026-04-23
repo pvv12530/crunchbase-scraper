@@ -1,4 +1,9 @@
 import type { ChunkRecord } from "@shared/models";
+import type { DelaySettings } from "@shared/delaySettings";
+import {
+  ensurePersistedDelaySettingsInitialized,
+  loadPersistedDelaySettings,
+} from "@shared/delaySettings";
 import { injectPageHook, PAGE_HOOK_SOURCE } from "./pageBridge";
 import {
   clickElement,
@@ -17,20 +22,6 @@ import {
 
 const SOURCE_CRUNCHBASE_DISCOVER_ORGS = "crunchbase-discover-orgs" as const;
 const DISCOVER_ORGS_PATH = "/discover/organization.companies";
-
-const DELAYS = {
-  afterFinancialsClickMs: 650,
-  afterCustomClickMs: 450,
-  afterSetDatesMs: 650,
-  afterDatesResultsLoadMs: 10_000,
-  afterSettingsClickMs: 250,
-  afterMenuOpenMs: 250,
-  afterToggleColumnMs: 200,
-  afterApplyViewMs: 1000,
-  beforeNextClickMs: 30_000, // IMPORTANT: wait 30_000ms (30 seconds) before clicking Next
-  afterNextClickMs: 1600,
-  afterApplyFiltersWaitMs: 20_000,
-};
 
 const SELECTORS = {
   /** Prefer Material pagination control (often `<a>` when disabled, not `<button>`). */
@@ -93,6 +84,7 @@ function findAdvancedFilterByHeader(
 async function configureResultsTableView(
   searchKeywords: string[],
   log: (t: string) => void | Promise<void>,
+  delays: DelaySettings,
   signal?: AbortSignal,
 ): Promise<void> {
   if (!Array.isArray(searchKeywords) || searchKeywords.length === 0) {
@@ -104,11 +96,11 @@ async function configureResultsTableView(
 
   // Settings button exists only once results header is rendered.
   // Wait for results UI to render after filters change.
-  await waitForResultsRoot(15_000, signal);
+  await waitForResultsRoot(delays.settingsButtonWaitMs, signal);
 
   const settingsSelector = SELECTORS.resultsHeaderSettingsButton.join(",");
   const settings = await waitForElement(settingsSelector, {
-    timeoutMs: 15_000,
+    timeoutMs: delays.settingsButtonWaitMs,
     signal,
   });
 
@@ -118,10 +110,10 @@ async function configureResultsTableView(
   if (!menu) {
     clickElement(settings);
     await log('Clicked results header "Settings"');
-    await sleep(DELAYS.afterSettingsClickMs);
+    await sleep(delays.afterSettingsClickMs);
     // Wait for menu panel to actually open.
     const maybeMenu = await waitForElement(SELECTORS.menuPanel.join(","), {
-      timeoutMs: 8000,
+      timeoutMs: delays.settingsMenuWaitMs,
       signal,
     });
     menu = isElementDisplayed(maybeMenu)
@@ -135,7 +127,7 @@ async function configureResultsTableView(
     await log("Settings menu did not open (skipping).");
     return;
   }
-  await sleep(DELAYS.afterMenuOpenMs);
+  await sleep(delays.afterMenuOpenMs);
 
   const editTable = findButtonLikeByText(menu, "Edit table view");
   if (!editTable) {
@@ -149,13 +141,13 @@ async function configureResultsTableView(
 
   // Wait for Edit View dialog and its filter input.
   const dialog = await waitForElement(SELECTORS.editViewDialog.join(","), {
-    timeoutMs: 10_000,
+    timeoutMs: delays.editViewDialogWaitMs,
     signal,
   });
 
   const filterInputEl = (await waitForElement(
     SELECTORS.editViewFilterInput.join(","),
-    { timeoutMs: 10_000, signal, root: dialog },
+    { timeoutMs: delays.editViewFilterInputWaitMs, signal, root: dialog },
   )) as Element;
   if (!(filterInputEl instanceof HTMLInputElement)) {
     await log("Edit View: could not locate filter input (skipping).");
@@ -350,7 +342,7 @@ async function configureResultsTableView(
 
     // Clear input for next iteration and enforce 100ms pacing per column.
     setInputValue(filterInputEl, "", { blur: false });
-    await sleep(DELAYS.afterToggleColumnMs);
+    await sleep(delays.afterToggleColumnMs);
   }
 
   const applyBtn = findButtonLikeByText(dialog, "Apply Changes");
@@ -404,7 +396,7 @@ async function configureResultsTableView(
     if (!stillOpen) break;
     await sleep(120);
   }
-  await sleep(DELAYS.afterApplyViewMs);
+  await sleep(delays.afterApplyViewMs);
   await log("Table view: applied column changes.");
 }
 
@@ -420,10 +412,11 @@ async function applyFinancialsValuationDateFilter(
   startDate: string,
   endDate: string,
   log: (t: string) => void | Promise<void>,
+  delays: DelaySettings,
   signal?: AbortSignal,
 ): Promise<void> {
   const overlay = await waitForElement("filter-overlay", {
-    timeoutMs: 6500,
+    timeoutMs: delays.financialsOverlayWaitMs,
     signal,
   });
 
@@ -444,7 +437,7 @@ async function applyFinancialsValuationDateFilter(
   }
   await log('Clicked "Custom Date Range"');
 
-  await sleep(DELAYS.afterCustomClickMs);
+  await sleep(delays.afterCustomClickMs);
 
   const inputs = Array.from(adv.querySelectorAll("input")).filter(
     (x): x is HTMLInputElement => x instanceof HTMLInputElement && !x.disabled,
@@ -470,10 +463,10 @@ async function applyFinancialsValuationDateFilter(
 
   await log("Input start date…");
   setInputValue(start, startDate);
-  await sleep(DELAYS.afterSetDatesMs);
+  await sleep(delays.afterSetDatesMs);
   await log("Input end date…");
   setInputValue(end, endDate);
-  await sleep(DELAYS.afterSetDatesMs);
+  await sleep(delays.afterSetDatesMs);
   await log(`Last Funding Date: set custom range to ${startDate} → ${endDate}`);
 }
 
@@ -553,6 +546,7 @@ async function rewindResultsToFirstPage(
   log: (t: string) => void | Promise<void>,
   signal: AbortSignal | undefined,
   maxSteps: number,
+  delays: DelaySettings,
 ): Promise<void> {
   const prev = findPrevButton();
   const next = findNextButton();
@@ -587,14 +581,14 @@ async function rewindResultsToFirstPage(
     }
 
     await log(
-      `Waiting ${DELAYS.beforeNextClickMs / 1000}s before clicking Previous…`,
+      `Waiting ${delays.beforeNextClickMs / 1000}s before clicking Previous…`,
     );
-    await sleep(DELAYS.beforeNextClickMs);
+    await sleep(delays.beforeNextClickMs);
     p.click();
     await log('Clicked "Previous"');
-    await sleep(DELAYS.afterNextClickMs);
+    await sleep(delays.afterNextClickMs);
     await log("Waiting for previous page results…");
-    await sleep(DELAYS.afterApplyFiltersWaitMs);
+    await sleep(delays.afterApplyFiltersWaitMs);
   }
 
   await log(
@@ -749,6 +743,10 @@ export async function runDiscoverScrape(
   assertDiscoverOrgPage();
   const ranges = buildPerDateRuns(dateKeyOrKeys);
 
+  // Ensure delay defaults exist on first run/install.
+  await ensurePersistedDelaySettingsInitialized();
+  const delays = await loadPersistedDelaySettings();
+
   // Install network capture for the main search endpoint early.
   ensureSearchResultsNetworkInterceptorInstalled();
   ensureSearchResultsListenerInstalled();
@@ -787,9 +785,18 @@ export async function runDiscoverScrape(
       throw err;
     }
 
+    // After a new tab load / navigation, Crunchbase often needs a moment
+    // before the results header settings and dialogs are reliably clickable.
+    if (!didConfigureView) {
+      await log(
+        `Waiting ${Math.round(delays.afterTabLoadBeforeConfigureMs / 1000)}s before configuring table view…`,
+      );
+      await sleep(delays.afterTabLoadBeforeConfigureMs);
+    }
+
     await log("Waiting for results table…");
     try {
-      await waitForResultsRoot(20_000, signal);
+      await waitForResultsRoot(delays.resultsRootWaitMs, signal);
       await log("Results visible.");
     } catch {
       await log("Results table not detected yet (continuing).");
@@ -798,7 +805,7 @@ export async function runDiscoverScrape(
     const maxPages = 500;
 
     // Step 1 (new requirement): rewind pagination FIRST (Prev until disabled).
-    await rewindResultsToFirstPage(log, signal, maxPages);
+    await rewindResultsToFirstPage(log, signal, maxPages, delays);
 
     // Step 2: configure table view after rewinding to page 1.
     if (!didConfigureView) {
@@ -806,6 +813,7 @@ export async function runDiscoverScrape(
         await configureResultsTableView(
           TABLE_VIEW_COLUMNS_SEARCH_KEYWORDS,
           log,
+          delays,
           signal,
         );
         didConfigureView = true;
@@ -823,13 +831,14 @@ export async function runDiscoverScrape(
     const clickedFinancials = clickFilterGroupButtonByLabel("Financials");
     if (clickedFinancials) {
       await log('Clicked "Financials" button');
-      await sleep(DELAYS.afterFinancialsClickMs);
+      await sleep(delays.afterFinancialsClickMs);
       await log("Selected filter group: Financials");
       try {
         await applyFinancialsValuationDateFilter(
           r.startDate,
           r.endDate,
           log,
+          delays,
           signal,
         );
       } catch (e) {
@@ -846,14 +855,14 @@ export async function runDiscoverScrape(
     // Page 1 must be a "no afterId" call (true first page after rewinding).
     const firstWait = waitForLastCustomAdvancedSearchResults(
       `${r.runKey}/page-1`,
-      90_000,
-      1250,
+      delays.searchApiCaptureTimeoutMs,
+      delays.searchApiCapturePollMs,
       (url) => !urlHasAfterId(url),
       signal,
     );
 
     await log("Waiting 10s for results to reload after date change…");
-    await sleep(DELAYS.afterDatesResultsLoadMs);
+    await sleep(delays.afterDatesResultsLoadMs);
 
     // Scrape by capturing Crunchbase search API responses only.
     let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null =
@@ -874,8 +883,8 @@ export async function runDiscoverScrape(
           : await (nextPageWait ??
               waitForLastCustomAdvancedSearchResults(
                 `${r.runKey}/page-${pageIndex + 1}`,
-                90_000,
-                1250,
+                delays.searchApiCaptureTimeoutMs,
+                delays.searchApiCapturePollMs,
                 undefined,
                 signal,
               ));
@@ -942,16 +951,16 @@ export async function runDiscoverScrape(
       // Create the pending slot BEFORE clicking Next so we don't miss fast responses.
       nextPageWait = waitForLastCustomAdvancedSearchResults(
         `${r.runKey}/page-${pageIndex + 2}`,
-        90_000,
-        1250,
+        delays.searchApiCaptureTimeoutMs,
+        delays.searchApiCapturePollMs,
         undefined,
         signal,
       );
       await log("Waiting 60s before clicking Next…");
-      await sleep(DELAYS.beforeNextClickMs);
+      await sleep(delays.beforeNextClickMs);
       next.click();
       await log('Clicked "Next"');
-      await sleep(DELAYS.afterNextClickMs);
+      await sleep(delays.afterNextClickMs);
     }
 
     await opts?.onDateComplete?.(r.runKey, totalRowsForDate);
@@ -972,12 +981,15 @@ export async function runDiscoverScrapeCurrentResults(
 }> {
   assertDiscoverOrgPage();
 
+  await ensurePersistedDelaySettingsInitialized();
+  const delays = await loadPersistedDelaySettings();
+
   await log("Scrape mode: current search results (API capture only).");
   ensureSearchResultsNetworkInterceptorInstalled();
   ensureSearchResultsListenerInstalled();
   await log("Waiting for results table…");
   try {
-    await waitForResultsRoot(12_000, signal);
+    await waitForResultsRoot(delays.resultsRootWaitMs, signal);
     await log("Results visible. Starting scrape…");
   } catch {
     await log("Results table not detected yet (continuing).");
@@ -988,16 +1000,16 @@ export async function runDiscoverScrapeCurrentResults(
   const maxPages = 500;
 
   await log("Waiting 10s for results to load…");
-  await sleep(DELAYS.afterDatesResultsLoadMs);
+  await sleep(delays.afterDatesResultsLoadMs);
 
   const firstWait = waitForLastCustomAdvancedSearchResults(
     `${runKey}/page-1`,
-    90_000,
-    1250,
+    delays.searchApiCaptureTimeoutMs,
+    delays.searchApiCapturePollMs,
     (url) => !urlHasAfterId(url),
     signal,
   );
-  await rewindResultsToFirstPage(log, signal, maxPages);
+  await rewindResultsToFirstPage(log, signal, maxPages, delays);
 
   let nextPageWait: Promise<CustomAdvancedSearchResponse | null> | null = null;
   for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
@@ -1013,8 +1025,8 @@ export async function runDiscoverScrapeCurrentResults(
         : await (nextPageWait ??
             waitForLastCustomAdvancedSearchResults(
               `${runKey}/page-${pageIndex + 1}`,
-              90_000,
-              1250,
+              delays.searchApiCaptureTimeoutMs,
+              delays.searchApiCapturePollMs,
               undefined,
               signal,
             ));
@@ -1077,16 +1089,16 @@ export async function runDiscoverScrapeCurrentResults(
 
     nextPageWait = waitForLastCustomAdvancedSearchResults(
       `${runKey}/page-${pageIndex + 2}`,
-      90_000,
-      1250,
+      delays.searchApiCaptureTimeoutMs,
+      delays.searchApiCapturePollMs,
       undefined,
       signal,
     );
     await log("Waiting 60s before clicking Next…");
-    await sleep(DELAYS.beforeNextClickMs);
+    await sleep(delays.beforeNextClickMs);
     next.click();
     await log('Clicked "Next"');
-    await sleep(DELAYS.afterNextClickMs);
+    await sleep(delays.afterNextClickMs);
   }
 
   return {

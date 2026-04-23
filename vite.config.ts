@@ -13,7 +13,10 @@ export default defineConfig({
     tailwindcss(),
     react(),
     viteStaticCopy({
-      targets: [{ src: 'manifest.json', dest: '.' }],
+      targets: [
+        { src: 'manifest.json', dest: '.' },
+        { src: 'src/static/content/crunchbaseBootstrap.js', dest: 'content' },
+      ],
     }),
   ],
   resolve: {

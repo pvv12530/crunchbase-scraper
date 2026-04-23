@@ -21,13 +21,13 @@
   "content_scripts": [
     {
       "matches": ["https://www.crunchbase.com/*"],
-      "js": ["content/crunchbase.js"],
+      "js": ["content/crunchbaseBootstrap.js"],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["content/pageHook.js"],
+      "resources": ["content/pageHook.js", "content/crunchbase.js", "chunks/*.js"],
       "matches": ["https://www.crunchbase.com/*"]
     }
   ]

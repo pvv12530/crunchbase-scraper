@@ -5,6 +5,7 @@ import type { ExtensionMessage } from "@shared/messages";
 import type { ScrapeQueueState } from "@shared/models";
 import { triggerDownload } from "./export/download";
 import { Calendar } from "./components/Calendar";
+import { DelaySettingsPanel } from "./components/DelaySettingsPanel";
 import { JsonFilesList } from "./components/JsonFilesList";
 import {
   SUPABASE_JSON_PUBLIC_BASE,
@@ -420,6 +421,35 @@ export function App(): JSX.Element {
     void loadQueueState();
   };
 
+  const onStopScrape = useCallback(async () => {
+    const logBucket = localDateKey();
+    setLogsByDate((prev) => {
+      const cur = prev[logBucket] ?? [];
+      const next = [
+        ...cur,
+        {
+          at: new Date().toISOString(),
+          level: "warn" as const,
+          text: "Clicked stop — requesting abort…",
+        },
+      ].slice(-LOGS_MAX_PER_DATE);
+      return { ...prev, [logBucket]: next };
+    });
+    // Optimistically clear "running" UI immediately.
+    setQueueState((prev) =>
+      prev
+        ? {
+            ...prev,
+            activeDateKey: null,
+          }
+        : prev,
+    );
+    await chrome.runtime.sendMessage({
+      type: "scrape/stop",
+    } satisfies ExtensionMessage);
+    void loadQueueState();
+  }, [loadQueueState]);
+
   const onClearLogHistory = () => {
     if (!isDateKey(todayDateKey)) return;
     setLogsByDate((prev) => {
@@ -527,8 +557,7 @@ export function App(): JSX.Element {
             "text-[#8bd49a]",
           ].join(" ")}
         >
-          Scrape runs in the current tab (must be on Crunchbase Discover
-          Companies).
+          Scrape opens a new Crunchbase Discover tab per date and runs there.
         </span>
       </section>
 
@@ -566,6 +595,8 @@ export function App(): JSX.Element {
           CSV
         </button>
       </div>
+
+      <DelaySettingsPanel btnBaseClassName={btnBase} />
 
       {modeTab === "calendar" ? (
         <Calendar
@@ -683,53 +714,67 @@ export function App(): JSX.Element {
           Actions for {selectedDateKey || "—"}
         </h2>
         <div className="mb-2 flex flex-wrap gap-2">
-          <button
-            type="button"
-            className={[
-              "group relative flex flex-1 min-w-[140px] items-center justify-center gap-2.5 overflow-hidden rounded-xl px-4 py-3 text-[13px] font-semibold tracking-tight text-white",
-              "border border-[#6ea8ff]/25 bg-linear-to-b from-[#5f9aff] via-[#4c8bf5] to-[#3d7ae8]",
-              "shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_4px_14px_rgba(76,139,245,0.35)]",
-              "transition-[transform,box-shadow,filter] duration-150",
-              "hover:from-[#6aa6ff] hover:via-[#5b94ff] hover:to-[#4586f0] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_6px_20px_rgba(76,139,245,0.45)]",
-              "active:translate-y-px active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.12)]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4c8bf5] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
-              "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none",
-            ].join(" ")}
-            disabled={scrapeDisabled || anyRunning || selectedScrapeBusy}
-            onClick={() => void onScrape()}
-          >
-            {anyRunning ? (
-              <Loader2
-                className="relative h-[18px] w-[18px] shrink-0 animate-spin text-white drop-shadow-sm"
-                size={18}
-                strokeWidth={2}
-                aria-hidden
-              />
-            ) : (
+          {anyRunning ? (
+            <section className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[12px] text-[#9aa3b2]">
+                  <Loader2
+                    className="h-4 w-4 animate-spin text-[#4c8bf5]"
+                    strokeWidth={2}
+                    aria-hidden
+                  />
+                  <span>
+                    Running{" "}
+                    <span className="font-mono text-[#e8eaef]">
+                      {queueState?.activeDateKey ?? "—"}
+                    </span>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={[
+                    "rounded-lg border px-3 py-2 text-xs font-semibold cursor-pointer transition-opacity disabled:opacity-[0.45] disabled:cursor-not-allowed",
+                    "border-[#f0a96e]/35 bg-[#2a1f16] text-[#f0a96e] hover:bg-[#332419]",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0a96e]/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
+                  ].join(" ")}
+                  onClick={() => void onStopScrape()}
+                >
+                  Stop
+                </button>
+              </div>
+              <p className="mt-2 mb-0 text-[11px] text-[#5c6570]">
+                Stop will abort the active tab scrape immediately.
+              </p>
+            </section>
+          ) : selectedQueued ? (
+            "Queued…"
+          ) : (
+            <button
+              type="button"
+              className={[
+                "group relative flex flex-1 min-w-[140px] items-center justify-center gap-2.5 overflow-hidden rounded-xl px-4 py-3 text-[13px] font-semibold tracking-tight text-white",
+                "border border-[#6ea8ff]/25 bg-linear-to-b from-[#5f9aff] via-[#4c8bf5] to-[#3d7ae8]",
+                "shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_4px_14px_rgba(76,139,245,0.35)]",
+                "transition-[transform,box-shadow,filter] duration-150",
+                "hover:from-[#6aa6ff] hover:via-[#5b94ff] hover:to-[#4586f0] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_6px_20px_rgba(76,139,245,0.45)]",
+                "active:translate-y-px active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.12)]",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4c8bf5] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
+                "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none",
+              ].join(" ")}
+              disabled={scrapeDisabled || anyRunning || selectedScrapeBusy}
+              onClick={() => void onScrape()}
+            >
               <Play
                 className="relative h-[18px] w-[18px] shrink-0 text-white drop-shadow-sm"
                 size={18}
                 strokeWidth={2}
                 aria-hidden
               />
-            )}
-            <span className="relative">
-              {anyRunning
-                ? "Scraping…"
-                : selectedQueued
-                  ? "Queued…"
-                  : "Scrape this date"}
-            </span>
-          </button>
-          {/* <button
-            type="button"
-            className={btnBase}
-            disabled={!isCb}
-            onClick={() => void onScrapeResults()}
-            title="Scrape current filtered results on the Crunchbase tab (no JSON saved)"
-          >
-            Scrape results
-          </button> */}
+              <span className="relative">
+                {selectedQueued ? "Queued…" : "Scrape this date"}
+              </span>
+            </button>
+          )}
         </div>
 
         <div className="mb-3 rounded-[10px] border border-[#2a3140] bg-[#161a22] p-2.5">
