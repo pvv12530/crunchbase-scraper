@@ -43,6 +43,10 @@ export interface TabContextPayload {
 export interface ScrapeQueueState {
   pending: string[];
   activeDateKey: string | null;
+  /** When non-null and in the future, background is intentionally waiting between dates. */
+  cooldownUntilMs?: number | null;
+  /** Date that just finished; used for UI while waiting. */
+  cooldownFromDateKey?: string | null;
   stagedAfterAbort: string[] | null;
   /** Full CSV order for UI; survives reload while a batch exists. */
   batchOrder: string[] | null;

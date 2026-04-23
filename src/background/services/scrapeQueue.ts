@@ -15,6 +15,8 @@ const DISCOVER_COMPANIES_RUN_URL =
 let mem: ScrapeQueueState = {
   pending: [],
   activeDateKey: null,
+  cooldownUntilMs: null,
+  cooldownFromDateKey: null,
   stagedAfterAbort: null,
   batchOrder: null,
   multiDateExportSession: false,
@@ -53,6 +55,14 @@ async function load(): Promise<void> {
     mem = {
       pending: Array.isArray(raw.pending) ? [...raw.pending] : [],
       activeDateKey: raw.activeDateKey ?? null,
+      cooldownUntilMs:
+        typeof raw.cooldownUntilMs === "number" && Number.isFinite(raw.cooldownUntilMs)
+          ? raw.cooldownUntilMs
+          : null,
+      cooldownFromDateKey:
+        typeof raw.cooldownFromDateKey === "string" && raw.cooldownFromDateKey.length > 0
+          ? raw.cooldownFromDateKey
+          : null,
       stagedAfterAbort: raw.stagedAfterAbort ? [...raw.stagedAfterAbort] : null,
       batchOrder: raw.batchOrder ? [...raw.batchOrder] : null,
       multiDateExportSession: raw.multiDateExportSession === true,
@@ -77,6 +87,8 @@ export async function getQueueState(): Promise<ScrapeQueueState> {
   return {
     pending: [...mem.pending],
     activeDateKey: mem.activeDateKey,
+    cooldownUntilMs: mem.cooldownUntilMs ?? null,
+    cooldownFromDateKey: mem.cooldownFromDateKey ?? null,
     stagedAfterAbort: mem.stagedAfterAbort ? [...mem.stagedAfterAbort] : null,
     batchOrder: mem.batchOrder ? [...mem.batchOrder] : null,
     multiDateExportSession: mem.multiDateExportSession,
@@ -103,6 +115,8 @@ export async function enqueueFromImport(
     mem.stagedAfterAbort = next;
     mem.batchOrder = [...next];
     mem.multiDateExportSession = multi;
+    mem.cooldownUntilMs = null;
+    mem.cooldownFromDateKey = null;
     await save();
     await requestAbortActiveTab();
     return;
@@ -111,6 +125,8 @@ export async function enqueueFromImport(
   mem.batchOrder = [...next];
   mem.stagedAfterAbort = null;
   mem.multiDateExportSession = multi;
+  mem.cooldownUntilMs = null;
+  mem.cooldownFromDateKey = null;
   await save();
 }
 
@@ -121,6 +137,8 @@ export async function enqueueRetry(dateKey: string): Promise<void> {
   mem.batchOrder = null;
   mem.multiDateExportSession = false;
   mem.sessionGroupId = null;
+  mem.cooldownUntilMs = null;
+  mem.cooldownFromDateKey = null;
   const i = mem.pending.indexOf(dateKey);
   if (i >= 0) mem.pending.splice(i, 1);
   mem.pending.unshift(dateKey);
@@ -146,6 +164,8 @@ export async function clearPendingQueue(): Promise<void> {
   mem.batchOrder = null;
   mem.multiDateExportSession = false;
   mem.sessionGroupId = null;
+  mem.cooldownUntilMs = null;
+  mem.cooldownFromDateKey = null;
   await save();
   if (mem.activeDateKey !== null) {
     await requestAbortActiveTab();
@@ -163,6 +183,8 @@ export async function clearQueueAfterStop(): Promise<void> {
   mem.batchOrder = null;
   mem.multiDateExportSession = false;
   mem.sessionGroupId = null;
+  mem.cooldownUntilMs = null;
+  mem.cooldownFromDateKey = null;
   await save();
 }
 
@@ -218,6 +240,8 @@ export async function requestStopCurrent(): Promise<void> {
     mem.batchOrder = null;
     mem.multiDateExportSession = false;
     mem.sessionGroupId = null;
+    mem.cooldownUntilMs = null;
+    mem.cooldownFromDateKey = null;
     await save();
   }
 
@@ -546,7 +570,7 @@ async function sleepWithProgress(
       emitUiLog(dateKey, `Wait: ${formatMs(remaining)} remaining…`);
       lastRemaining = remaining;
     }
-    await new Promise((r) => window.setTimeout(r, Math.min(750, remaining)));
+    await new Promise((r) => globalThis.setTimeout(r, Math.min(750, remaining)));
   }
 }
 
@@ -640,6 +664,8 @@ export async function tryStartNext(): Promise<void> {
 
   const dateKey = mem.pending.shift()!;
   mem.activeDateKey = dateKey;
+  mem.cooldownUntilMs = null;
+  mem.cooldownFromDateKey = null;
   await save();
 
   try {
@@ -712,7 +738,14 @@ export async function onScrapeFinished(dateKey: string): Promise<void> {
       typeof delays.betweenDatesLogTickMs === "number"
         ? delays.betweenDatesLogTickMs
         : 15_000;
+    mem.cooldownUntilMs = Date.now() + betweenDatesMs;
+    mem.cooldownFromDateKey = dateKey;
+    await save();
     await sleepWithProgress(dateKey, betweenDatesMs, tickMs);
+    await load();
+    mem.cooldownUntilMs = null;
+    mem.cooldownFromDateKey = null;
+    await save();
   }
   await tryStartNext();
 }

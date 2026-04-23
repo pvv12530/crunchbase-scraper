@@ -6,12 +6,13 @@ import type { ScrapeQueueState } from "@shared/models";
 import { triggerDownload } from "./export/download";
 import { Calendar } from "./components/Calendar";
 import { DelaySettingsPanel } from "./components/DelaySettingsPanel";
-import { JsonFilesList } from "./components/JsonFilesList";
+import { JsonFilesGroupedList } from "./components/JsonFilesGroupedList";
 import {
   SUPABASE_JSON_PUBLIC_BASE,
   fetchSupabaseJsonFilesByDate,
   type SupabaseJsonFile,
 } from "./services/supabaseJsonFiles";
+import { zipSync } from "fflate";
 
 function isDateKey(x: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(x);
@@ -135,6 +136,8 @@ export function App(): JSX.Element {
   const [remoteJsonDeletingById, setRemoteJsonDeletingById] = useState<
     Record<string, boolean>
   >({});
+  const [remoteJsonDownloadingGroupById, setRemoteJsonDownloadingGroupById] =
+    useState<Record<string, boolean>>({});
   /** Supabase `file_date` bucket(s) last queried (for refresh after delete). */
   const [remoteJsonQueryKeys, setRemoteJsonQueryKeys] = useState<string[]>([]);
   const [remoteCloudBucketsLabel, setRemoteCloudBucketsLabel] =
@@ -211,6 +214,51 @@ export function App(): JSX.Element {
       setRemoteJsonDownloadingById((prev) => ({ ...prev, [f.id]: false }));
     }
   }, []);
+
+  const downloadRemoteJsonGroupZip = useCallback(
+    async (groupId: string, files: SupabaseJsonFile[]) => {
+      const groupKey = (groupId ?? "").trim() || "(no group)";
+      setRemoteJsonError("");
+      setRemoteJsonDownloadingGroupById((prev) => ({
+        ...prev,
+        [groupKey]: true,
+      }));
+      try {
+        const entries: Record<string, Uint8Array> = {};
+        const safeGroup =
+          groupKey === "(no group)"
+            ? "no-group"
+            : groupKey.replace(/[^\w.-]+/g, "_").slice(0, 80) || "group";
+
+        for (const f of files) {
+          const publicUrl = `${SUPABASE_JSON_PUBLIC_BASE}${f.file_path}`;
+          const url = (f.signed_url ?? "").trim() || publicUrl;
+          const filename = f.file_path.split("/").pop() ?? `${f.id}.json`;
+          const res = await fetch(url, { method: "GET" });
+          if (!res.ok) {
+            throw new Error(
+              `Download failed (${res.status}) for ${filename}`,
+            );
+          }
+          const buf = await res.arrayBuffer();
+          entries[filename] = new Uint8Array(buf);
+        }
+
+        const zipped = zipSync(entries, { level: 0 });
+        const zipBlob = new Blob([zipped as unknown as BlobPart], {
+          type: "application/zip",
+        });
+        const dateLabel = localDateKey();
+        triggerDownload(zipBlob, `crunchbase-json-group-${dateLabel}-${safeGroup}.zip`);
+      } finally {
+        setRemoteJsonDownloadingGroupById((prev) => ({
+          ...prev,
+          [groupKey]: false,
+        }));
+      }
+    },
+    [],
+  );
 
   const deleteRemoteJsonFile = useCallback(
     async (id: string) => {
@@ -542,7 +590,10 @@ export function App(): JSX.Element {
   const selectedRunning =
     hasValidSelectedDate && queueState?.activeDateKey === selectedDateKey;
   const selectedScrapeBusy = selectedQueued || selectedRunning;
-  const anyRunning = queueState?.activeDateKey != null;
+  const cooldownActive =
+    typeof queueState?.cooldownUntilMs === "number" &&
+    queueState.cooldownUntilMs > Date.now();
+  const anyRunning = queueState?.activeDateKey != null || cooldownActive;
 
   const todayLogs = logsByDate[todayDateKey] ?? [];
   const lastLogTail =
@@ -757,7 +808,9 @@ export function App(): JSX.Element {
                   <span>
                     Running{" "}
                     <span className="font-mono text-[#e8eaef]">
-                      {queueState?.activeDateKey ?? "—"}
+                      {queueState?.activeDateKey ??
+                        queueState?.cooldownFromDateKey ??
+                        "—"}
                     </span>
                   </span>
                 </div>
@@ -886,15 +939,22 @@ export function App(): JSX.Element {
             : "A new Discover tab is opened per date; the scraper configures table view and date range automatically."}
         </p>
 
-        <JsonFilesList
+        <JsonFilesGroupedList
           bucketsLabel={remoteCloudBucketsLabel}
           files={remoteJsonFiles}
           loading={remoteJsonLoading}
           error={remoteJsonError}
           downloadingById={remoteJsonDownloadingById}
           deletingById={remoteJsonDeletingById}
+          downloadingGroupById={remoteJsonDownloadingGroupById}
+          onReload={() =>
+            void refreshRemoteJsonFilesForKeys(
+              remoteJsonQueryKeys.length > 0 ? remoteJsonQueryKeys : [todayDateKey],
+            )
+          }
           onDownload={downloadRemoteJsonFile}
           onDelete={deleteRemoteJsonFile}
+          onDownloadGroup={downloadRemoteJsonGroupZip}
         />
       </section>
     </div>

@@ -26,17 +26,13 @@ export async function handleContentDone(dateKey: string, totalRows: number): Pro
       .sendMessage({ type: 'scrape/complete', dateKey, meta: done } satisfies ExtensionMessage)
       .catch(() => {});
   }
-  const qBefore = await getQueueState();
-  const deferCloudAndFileForBatch =
-    qBefore.multiDateExportSession === true &&
-    Array.isArray(qBefore.batchOrder) &&
-    qBefore.batchOrder.length > 1;
-
   await onScrapeFinished(dateKey);
   try {
     await exportMergedJsonFromDateChunks(dateKey, {
-      skipDownload: deferCloudAndFileForBatch,
-      skipUpload: deferCloudAndFileForBatch,
+      // Requirement: always create + upload merged JSON when a date finishes.
+      // (Batch zip download can still happen separately.)
+      skipDownload: false,
+      skipUpload: false,
     });
   } finally {
     await tryDownloadBatchZipIfComplete();

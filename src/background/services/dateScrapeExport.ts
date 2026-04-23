@@ -132,7 +132,9 @@ async function uploadMergedJsonToSupabase(
 ): Promise<boolean> {
   try {
     const fd = new FormData();
-    fd.append("date", dateKey);
+    // Requirement: bucket uploads by *current* date, not the scraped date.
+    // The filename still includes the scraped dateKey for traceability.
+    fd.append("date", localDateKey());
     if (built.meta.groupId) fd.append("group_id", built.meta.groupId);
     fd.append(
       "file",
@@ -195,28 +197,7 @@ export async function tryDownloadBatchZipIfComplete(): Promise<void> {
   await emitLog(
     logKey,
     "info",
-    `Batch: uploading ${builtList.length} JSON file(s) to Supabase…`,
-  );
-
-   let uploadOk = 0;
-  for (const { dateKey, built } of builtList) {
-    const ok = await uploadMergedJsonToSupabase(dateKey, built);
-    if (ok) uploadOk += 1;
-  }
-
-  if (uploadOk > 0) {
-    await chrome.runtime
-      .sendMessage({
-        type: "scrape/jsonArtifactsUpdated",
-        dateKeys: builtList.map((x) => x.dateKey),
-      } satisfies ExtensionMessage)
-      .catch(() => {});
-  }
-
-  await emitLog(
-    logKey,
-    uploadOk === builtList.length ? "info" : "warn",
-    `Batch: cloud upload finished (${uploadOk}/${builtList.length} ok). Downloading zip…`,
+    `Batch: downloading zip of ${builtList.length} JSON file(s)…`,
   );
 
   const entries: Record<string, Uint8Array> = {};
@@ -332,7 +313,8 @@ export async function exportMergedJsonFromDateChunks(
   await chrome.runtime
     .sendMessage({
       type: "scrape/jsonArtifactsUpdated",
-      dateKeys: [dateKey],
+      // Refresh the current-day bucket where uploads land.
+      dateKeys: [localDateKey()],
     } satisfies ExtensionMessage)
     .catch(() => {});
 }

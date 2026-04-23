@@ -8,6 +8,7 @@ export type SupabaseJsonFile = {
   file_date: string;
   file_path: string;
   created_at: string;
+  group_id?: string | null;
   signed_url?: string | null;
 };
 
