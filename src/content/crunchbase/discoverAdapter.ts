@@ -22,6 +22,7 @@ import {
 
 const SOURCE_CRUNCHBASE_DISCOVER_ORGS = "crunchbase-discover-orgs" as const;
 const DISCOVER_ORGS_PATH = "/discover/organization.companies";
+const RATE_LIMIT_ERROR_PREFIX = "RATE_LIMIT:";
 
 const SELECTORS = {
   /** Prefer Material pagination control (often `<a>` when disabled, not `<button>`). */
@@ -604,6 +605,21 @@ type CustomAdvancedSearchResponse = {
   } & Record<string, unknown>;
 };
 
+function isRateLimitSearchBody(body: CustomAdvancedSearchResponse["body"]): boolean {
+  // We only have JSON bodies (no HTTP status). Crunchbase commonly returns
+  // error shapes that include "rate" / "limit" / 429-ish hints.
+  const b = body as Record<string, unknown>;
+  const asText = JSON.stringify(b).toLowerCase();
+  if (!asText) return false;
+  if (asText.includes("rate limit")) return true;
+  if (asText.includes("ratelimit")) return true;
+  if (asText.includes("too many requests")) return true;
+  if (asText.includes("status\":429")) return true;
+  if (asText.includes("\"code\":429")) return true;
+  if (asText.includes("error_code") && asText.includes("rate")) return true;
+  return false;
+}
+
 type PendingSearch = {
   resolve: (v: CustomAdvancedSearchResponse | null) => void;
   timeoutTimer: number;
@@ -896,6 +912,18 @@ export async function runDiscoverScrape(
       }
       nextPageWait = null;
 
+      if (isRateLimitSearchBody(captured.body)) {
+        await log(
+          `Rate limit detected from search API. Cooling down ${Math.round(
+            delays.rateLimitCooldownMs / 60_000,
+          )} min then refreshing and retrying this date…`,
+        );
+        // Throw a sentinel error; background will pause/retry the same date instead of advancing.
+        throw new Error(
+          `${RATE_LIMIT_ERROR_PREFIX} custom_advanced_search returned a rate limit response`,
+        );
+      }
+
       const entitiesRaw = captured.body.entities;
       const entities: Record<string, unknown>[] = Array.isArray(entitiesRaw)
         ? (entitiesRaw.filter(
@@ -947,8 +975,11 @@ export async function runDiscoverScrape(
         break;
       }
 
+      await log("Waiting 60s before clicking Next…");
+      await sleep(delays.beforeNextClickMs);
       // Trigger loading next page (Crunchbase will call the same API again).
-      // Create the pending slot BEFORE clicking Next so we don't miss fast responses.
+      // IMPORTANT: start the capture window *right before* the click, so the
+      // timeout isn't consumed by the intentional wait above.
       nextPageWait = waitForLastCustomAdvancedSearchResults(
         `${r.runKey}/page-${pageIndex + 2}`,
         delays.searchApiCaptureTimeoutMs,
@@ -956,8 +987,6 @@ export async function runDiscoverScrape(
         undefined,
         signal,
       );
-      await log("Waiting 60s before clicking Next…");
-      await sleep(delays.beforeNextClickMs);
       next.click();
       await log('Clicked "Next"');
       await sleep(delays.afterNextClickMs);
@@ -1038,6 +1067,17 @@ export async function runDiscoverScrapeCurrentResults(
     }
     nextPageWait = null;
 
+    if (isRateLimitSearchBody(captured.body)) {
+      await log(
+        `Rate limit detected from search API. Cooling down ${Math.round(
+          delays.rateLimitCooldownMs / 60_000,
+        )} min then refreshing and retrying…`,
+      );
+      throw new Error(
+        `${RATE_LIMIT_ERROR_PREFIX} custom_advanced_search returned a rate limit response`,
+      );
+    }
+
     const entitiesRaw = captured.body.entities;
     const entities: Record<string, unknown>[] = Array.isArray(entitiesRaw)
       ? (entitiesRaw.filter(
@@ -1087,6 +1127,10 @@ export async function runDiscoverScrapeCurrentResults(
       break;
     }
 
+    await log("Waiting 60s before clicking Next…");
+    await sleep(delays.beforeNextClickMs);
+    // Start the capture window immediately before the click so long intentional
+    // waits don't cause premature timeouts (common when `beforeNextClickMs` is high).
     nextPageWait = waitForLastCustomAdvancedSearchResults(
       `${runKey}/page-${pageIndex + 2}`,
       delays.searchApiCaptureTimeoutMs,
@@ -1094,8 +1138,6 @@ export async function runDiscoverScrapeCurrentResults(
       undefined,
       signal,
     );
-    await log("Waiting 60s before clicking Next…");
-    await sleep(delays.beforeNextClickMs);
     next.click();
     await log('Clicked "Next"');
     await sleep(delays.afterNextClickMs);

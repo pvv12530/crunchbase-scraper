@@ -152,6 +152,55 @@ export async function clearPendingQueue(): Promise<void> {
   }
 }
 
+/**
+ * Clears remaining queued dates after a stop/error/cancel.
+ * Does NOT attempt to abort any tab; callers already stopped/failed the run.
+ */
+export async function clearQueueAfterStop(): Promise<void> {
+  await load();
+  mem.pending = [];
+  mem.stagedAfterAbort = null;
+  mem.batchOrder = null;
+  mem.multiDateExportSession = false;
+  mem.sessionGroupId = null;
+  await save();
+}
+
+export async function removePendingDate(dateKey: string): Promise<void> {
+  await load();
+
+  const removeAll = (arr: string[], key: string): string[] =>
+    arr.filter((x) => x !== key);
+
+  const prevPendingLen = mem.pending.length;
+  mem.pending = removeAll(mem.pending, dateKey);
+
+  if (mem.stagedAfterAbort) {
+    mem.stagedAfterAbort = removeAll(mem.stagedAfterAbort, dateKey);
+    if (mem.stagedAfterAbort.length === 0) mem.stagedAfterAbort = null;
+  }
+
+  if (mem.batchOrder) {
+    mem.batchOrder = removeAll(mem.batchOrder, dateKey);
+    if (mem.batchOrder.length === 0) mem.batchOrder = null;
+  }
+
+  if (mem.batchOrder == null && mem.pending.length <= 1) {
+    mem.multiDateExportSession = false;
+  }
+  if (mem.batchOrder == null && mem.pending.length === 0 && mem.activeDateKey == null) {
+    mem.sessionGroupId = null;
+  }
+
+  const changed = mem.pending.length !== prevPendingLen;
+  if (changed) await save();
+
+  // If nothing is running and there are still pending dates, make sure the queue advances.
+  if (changed && mem.activeDateKey == null && mem.pending.length > 0) {
+    await tryStartNext();
+  }
+}
+
 export async function requestStopCurrent(): Promise<void> {
   await load();
   const tabId = activeRunTabId;
@@ -163,6 +212,12 @@ export async function requestStopCurrent(): Promise<void> {
     mem.activeDateKey = null;
     // Runtime-only.
     activeRunTabId = null;
+    // If the user stops, clear the rest of the queue instead of advancing.
+    mem.pending = [];
+    mem.stagedAfterAbort = null;
+    mem.batchOrder = null;
+    mem.multiDateExportSession = false;
+    mem.sessionGroupId = null;
     await save();
   }
 
@@ -548,6 +603,36 @@ async function sendScrapeStartWithRetries(
     : new Error(`Failed to start scrape: ${String(lastErr)}`);
 }
 
+export async function handleRateLimitAndRetry(dateKey: string): Promise<void> {
+  await load();
+  if (mem.activeDateKey !== dateKey) return;
+  await ensurePersistedDelaySettingsInitialized();
+  const delays = await loadPersistedDelaySettings();
+  const cooldownMs =
+    typeof delays.rateLimitCooldownMs === "number" ? delays.rateLimitCooldownMs : 600_000;
+
+  emitUiLog(
+    dateKey,
+    `Rate limit: waiting ${formatMs(cooldownMs)} then refreshing and retrying…`,
+  );
+  await sleepWithProgress(dateKey, cooldownMs, 30_000);
+
+  // Re-navigate/reload the tab to clear UI/network state.
+  // This keeps the same active date and does NOT advance the queue.
+  try {
+    if (activeRunTabId == null) {
+      activeRunTabId = await openNewDiscoverCompaniesTab(dateKey);
+    } else {
+      activeRunTabId = await reuseDiscoverCompaniesTab(activeRunTabId, dateKey);
+    }
+  } catch (e) {
+    emitUiLog(
+      dateKey,
+      `Rate limit retry tab refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
 export async function tryStartNext(): Promise<void> {
   await load();
   if (mem.activeDateKey !== null) return;
@@ -622,7 +707,7 @@ export async function onScrapeFinished(dateKey: string): Promise<void> {
     await ensurePersistedDelaySettingsInitialized();
     const delays = await loadPersistedDelaySettings();
     const betweenDatesMs =
-      typeof delays.betweenDatesMs === "number" ? delays.betweenDatesMs : 120_000;
+      typeof delays.betweenDatesMs === "number" ? delays.betweenDatesMs : 600_000;
     const tickMs =
       typeof delays.betweenDatesLogTickMs === "number"
         ? delays.betweenDatesLogTickMs

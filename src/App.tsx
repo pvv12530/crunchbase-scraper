@@ -450,6 +450,37 @@ export function App(): JSX.Element {
     void loadQueueState();
   }, [loadQueueState]);
 
+  const onClearSelectedQueued = useCallback(async () => {
+    if (!isDateKey(selectedDateKey)) return;
+    const logBucket = localDateKey();
+    setLogsByDate((prev) => {
+      const cur = prev[logBucket] ?? [];
+      const next = [
+        ...cur,
+        {
+          at: new Date().toISOString(),
+          level: "info" as const,
+          text: `Cleared queued date ${selectedDateKey}`,
+        },
+      ].slice(-LOGS_MAX_PER_DATE);
+      return { ...prev, [logBucket]: next };
+    });
+    // Optimistically remove from pending so UI updates instantly.
+    setQueueState((prev) =>
+      prev
+        ? {
+            ...prev,
+            pending: (prev.pending ?? []).filter((k) => k !== selectedDateKey),
+          }
+        : prev,
+    );
+    await chrome.runtime.sendMessage({
+      type: "scrape/queueRemove",
+      dateKey: selectedDateKey,
+    } satisfies ExtensionMessage);
+    void loadQueueState();
+  }, [loadQueueState, selectedDateKey]);
+
   const onClearLogHistory = () => {
     if (!isDateKey(todayDateKey)) return;
     setLogsByDate((prev) => {
@@ -747,7 +778,17 @@ export function App(): JSX.Element {
               </p>
             </section>
           ) : selectedQueued ? (
-            "Queued…"
+            <button
+              type="button"
+              className={[
+                "rounded-lg border px-3 py-2 text-xs font-semibold cursor-pointer transition-opacity disabled:opacity-[0.45] disabled:cursor-not-allowed",
+                "border-[#6ea8ff]/25 bg-[#12151c] text-[#cfe0ff] hover:bg-[#161a22]",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4c8bf5] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
+              ].join(" ")}
+              onClick={() => void onClearSelectedQueued()}
+            >
+              Clear queued
+            </button>
           ) : (
             <button
               type="button"

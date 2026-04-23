@@ -13,7 +13,8 @@ export const DEFAULT_DELAYS = {
   beforeNextClickMs: 30_000,
   afterNextClickMs: 16_000,
   afterApplyFiltersWaitMs: 20_000,
-  betweenDatesMs: 120_000,
+  // Long pause between dates to avoid rate limits (10 minutes by default).
+  betweenDatesMs: 600_000,
 
   // Timeouts / waits (multi-second) that were previously hard-coded.
   tabLoadTimeoutMs: 60_000,
@@ -35,6 +36,9 @@ export const DEFAULT_DELAYS = {
   // After opening/navigating the Discover tab, wait before starting UI automation.
   // Helps Crunchbase finish rendering/hydration before we click Settings / Edit table view.
   afterTabLoadBeforeConfigureMs: 10_000,
+
+  // If we detect a rate limit response from the search API, cool down and retry the same date.
+  rateLimitCooldownMs: 600_000,
 } as const;
 
 export type DelayKey = keyof typeof DEFAULT_DELAYS;

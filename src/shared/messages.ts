@@ -19,6 +19,7 @@ export type ExtensionMessage =
   | { type: 'scrape/resultsStart'; runKey: string }
   | { type: 'scrape/stop' }
   | { type: 'scrape/queueClear' }
+  | { type: 'scrape/queueRemove'; dateKey: string }
   | { type: 'scrape/queueGet' }
   | { type: 'scrape/retryDate'; dateKey: string; sourceId: SourceId }
   | { type: 'scrape/queueChanged' }

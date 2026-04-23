@@ -221,6 +221,10 @@ export function initMessageRouter(): void {
               await scrapeQueue.clearPendingQueue();
               sendResponse({ ok: true });
               return;
+            case "scrape/queueRemove":
+              await scrapeQueue.removePendingDate(message.dateKey);
+              sendResponse({ ok: true });
+              return;
             case "scrape/start":
             case "scrape/retryDate":
               if (
