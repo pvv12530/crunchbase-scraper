@@ -21,8 +21,8 @@ type SupabaseJsonFile = {
   file_date: string;
   file_path: string;
   created_at: string;
-  group_id?: string | null;
-  rows_count?: number | string | null;
+  group_id: string;
+  rows_count: number | string;
   signed_url?: string | null;
 };
 
@@ -130,7 +130,10 @@ export function initMessageRouter(): void {
                 sendResponse({ ok: false });
             }
           } catch (e) {
-            sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+            sendResponse({
+              ok: false,
+              error: e instanceof Error ? e.message : String(e),
+            });
           }
         })();
         return true;

@@ -8,8 +8,9 @@ export type SupabaseJsonFile = {
   file_date: string;
   file_path: string;
   created_at: string;
-  group_id?: string | null;
-  signed_url?: string | null;
+  group_id: string;
+  rows_count: number | string;
+  signed_url?: string;
 };
 
 /** Fetches JSON file metadata for a calendar date from Supabase via the extension background. */

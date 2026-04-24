@@ -128,14 +128,27 @@ export function JsonFilesGroupedList({
                         .map((f) => {
                           const downloading = downloadingById[f.id] === true;
                           const deleting = deletingById[f.id] === true;
+                          const filename =
+                            f.file_path.split("/").pop() ?? f.file_path;
+                          const rows =
+                            f.rows_count == null || String(f.rows_count).trim() === ""
+                              ? null
+                              : String(f.rows_count).trim();
                           return (
                             <li
                               key={f.id}
                               className="flex items-center justify-between gap-2 rounded-md border border-[#2a3140] bg-[#0f1115]/30 px-2.5 py-2 text-xs"
                             >
-                              <span className="min-w-0 truncate text-[#e8eaef]">
-                                {f.file_path.split("/").pop() ?? f.file_path}
-                              </span>
+                              <div className="min-w-0">
+                                <div className="truncate text-[#e8eaef]">
+                                  {filename}
+                                </div>
+                                {rows ? (
+                                  <div className="mt-0.5 truncate font-mono text-[10px] text-[#9aa3b2]">
+                                    rows: {rows}
+                                  </div>
+                                ) : null}
+                              </div>
                               <div className="flex shrink-0 items-center gap-1.5">
                                 <button
                                   type="button"

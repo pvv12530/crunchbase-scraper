@@ -56,11 +56,13 @@ async function load(): Promise<void> {
       pending: Array.isArray(raw.pending) ? [...raw.pending] : [],
       activeDateKey: raw.activeDateKey ?? null,
       cooldownUntilMs:
-        typeof raw.cooldownUntilMs === "number" && Number.isFinite(raw.cooldownUntilMs)
+        typeof raw.cooldownUntilMs === "number" &&
+        Number.isFinite(raw.cooldownUntilMs)
           ? raw.cooldownUntilMs
           : null,
       cooldownFromDateKey:
-        typeof raw.cooldownFromDateKey === "string" && raw.cooldownFromDateKey.length > 0
+        typeof raw.cooldownFromDateKey === "string" &&
+        raw.cooldownFromDateKey.length > 0
           ? raw.cooldownFromDateKey
           : null,
       stagedAfterAbort: raw.stagedAfterAbort ? [...raw.stagedAfterAbort] : null,
@@ -210,7 +212,11 @@ export async function removePendingDate(dateKey: string): Promise<void> {
   if (mem.batchOrder == null && mem.pending.length <= 1) {
     mem.multiDateExportSession = false;
   }
-  if (mem.batchOrder == null && mem.pending.length === 0 && mem.activeDateKey == null) {
+  if (
+    mem.batchOrder == null &&
+    mem.pending.length === 0 &&
+    mem.activeDateKey == null
+  ) {
     mem.sessionGroupId = null;
   }
 
@@ -462,9 +468,13 @@ async function openNewDiscoverCompaniesTab(
     await ensurePersistedDelaySettingsInitialized();
     const delays = await loadPersistedDelaySettings();
     const tabLoadTimeoutMs =
-      typeof delays.tabLoadTimeoutMs === "number" ? delays.tabLoadTimeoutMs : 60_000;
+      typeof delays.tabLoadTimeoutMs === "number"
+        ? delays.tabLoadTimeoutMs
+        : 60_000;
     const tabUrlWaitTimeoutMs =
-      typeof delays.tabUrlWaitTimeoutMs === "number" ? delays.tabUrlWaitTimeoutMs : 60_000;
+      typeof delays.tabUrlWaitTimeoutMs === "number"
+        ? delays.tabUrlWaitTimeoutMs
+        : 60_000;
 
     // Wait until the tab is fully loaded *and* has reached the expected URL
     // (Crunchbase can redirect through intermediate URLs).
@@ -530,9 +540,13 @@ async function reuseDiscoverCompaniesTab(
     await ensurePersistedDelaySettingsInitialized();
     const delays = await loadPersistedDelaySettings();
     const tabLoadTimeoutMs =
-      typeof delays.tabLoadTimeoutMs === "number" ? delays.tabLoadTimeoutMs : 60_000;
+      typeof delays.tabLoadTimeoutMs === "number"
+        ? delays.tabLoadTimeoutMs
+        : 60_000;
     const tabUrlWaitTimeoutMs =
-      typeof delays.tabUrlWaitTimeoutMs === "number" ? delays.tabUrlWaitTimeoutMs : 60_000;
+      typeof delays.tabUrlWaitTimeoutMs === "number"
+        ? delays.tabUrlWaitTimeoutMs
+        : 60_000;
 
     await waitForTabLoaded(nextTabId, tabLoadTimeoutMs);
     await waitForTabUrlPrefix(
@@ -570,61 +584,10 @@ async function sleepWithProgress(
       emitUiLog(dateKey, `Wait: ${formatMs(remaining)} remaining…`);
       lastRemaining = remaining;
     }
-    await new Promise((r) => globalThis.setTimeout(r, Math.min(750, remaining)));
+    await new Promise((r) =>
+      globalThis.setTimeout(r, Math.min(750, remaining)),
+    );
   }
-}
-
-async function sendScrapeStartWithRetries(
-  dateKey: string,
-  tabId: number,
-  sessionGroupId?: string,
-): Promise<void> {
-  let lastErr: unknown = null;
-  let didInject = false;
-  for (let attempt = 0; attempt < 12; attempt++) {
-    try {
-      emitUiLog(
-        dateKey,
-        attempt === 0
-          ? "Starting scrape…"
-          : `Starting scrape (retry ${attempt + 1}/12)…`,
-      );
-
-      // MV3-safe: ensure the content script is present before messaging.
-      // Even after a "complete" load, SPA transitions/redirects can still race.
-      if (!didInject || attempt === 0) {
-        await injectCrunchbaseContentScript(tabId, dateKey).catch((e) => {
-          // Non-fatal: we'll still attempt to send (and reinject on "no receiver").
-          emitUiLog(
-            dateKey,
-            `Content script injection failed (will retry): ${e instanceof Error ? e.message : String(e)}`,
-          );
-        });
-        didInject = true;
-        // Give the injected script a moment to register its onMessage listener.
-        await sleepMs(250);
-      }
-
-      // NOTE: we no longer send a "start" message to the tab. The content script
-      // auto-starts when cb_autostart=1 is present in the URL.
-      return;
-    } catch (e) {
-      lastErr = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      emitUiLog(dateKey, `Scrape start not ready yet: ${msg}`);
-
-      // If the tab has no receiver, we need to (re)inject and retry.
-      if (isNoReceiverError(e)) {
-        didInject = false;
-      }
-
-      // Content script may not be ready yet right after load; back off.
-      await sleepMs(500 + attempt * 250);
-    }
-  }
-  throw lastErr instanceof Error
-    ? lastErr
-    : new Error(`Failed to start scrape: ${String(lastErr)}`);
 }
 
 export async function handleRateLimitAndRetry(dateKey: string): Promise<void> {
@@ -633,7 +596,9 @@ export async function handleRateLimitAndRetry(dateKey: string): Promise<void> {
   await ensurePersistedDelaySettingsInitialized();
   const delays = await loadPersistedDelaySettings();
   const cooldownMs =
-    typeof delays.rateLimitCooldownMs === "number" ? delays.rateLimitCooldownMs : 600_000;
+    typeof delays.rateLimitCooldownMs === "number"
+      ? delays.rateLimitCooldownMs
+      : 600_000;
 
   emitUiLog(
     dateKey,
@@ -733,7 +698,9 @@ export async function onScrapeFinished(dateKey: string): Promise<void> {
     await ensurePersistedDelaySettingsInitialized();
     const delays = await loadPersistedDelaySettings();
     const betweenDatesMs =
-      typeof delays.betweenDatesMs === "number" ? delays.betweenDatesMs : 600_000;
+      typeof delays.betweenDatesMs === "number"
+        ? delays.betweenDatesMs
+        : 600_000;
     const tickMs =
       typeof delays.betweenDatesLogTickMs === "number"
         ? delays.betweenDatesLogTickMs
