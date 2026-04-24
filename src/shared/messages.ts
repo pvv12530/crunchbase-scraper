@@ -8,7 +8,14 @@ export type ExtensionMessage =
   | { type: 'runs/list' }
   | { type: 'runs/listResponse'; runs: DateRunMeta[] }
   | { type: 'supabase/getJsonByDate'; date: string }
-  | { type: 'supabase/uploadJson'; date: string; filename: string; jsonText: string }
+  | {
+      type: 'supabase/uploadJson';
+      date: string;
+      filename: string;
+      jsonText: string;
+      group_id?: string;
+      rows_count?: string | number;
+    }
   | {
       type: 'scrape/start';
       dateKey: string;

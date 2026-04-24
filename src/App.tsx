@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Loader2, Play, Upload } from "lucide-react";
+import { ChevronDown, Download, Loader2, Play, Upload } from "lucide-react";
 import { SOURCE_CRUNCHBASE_DISCOVER_ORGS } from "@shared/constants";
 import type { ExtensionMessage } from "@shared/messages";
 import type { ScrapeQueueState } from "@shared/models";
@@ -34,6 +34,12 @@ const btnBase =
 const LOGS_PERSIST_KEY = "crunchbaseDateBatch.logsByDate.v1";
 const LOGS_MAX_DATES = 90;
 const LOGS_MAX_PER_DATE = 250;
+
+const SAMPLE_CSV_URL =
+  "https://gfxknuxbtkhomfodrrfr.supabase.co/storage/v1/object/public/json-files/sample/cruncbase-sample-csv.csv";
+
+const SUPABASE_JSON_FILES_BUCKET_URL =
+  "https://supabase.com/dashboard/project/gfxknuxbtkhomfodrrfr/storage/files/buckets/json-files";
 
 type LogLine = { at: string; level: "info" | "warn" | "error"; text: string };
 type LogsByDate = Record<string, LogLine[]>;
@@ -460,9 +466,15 @@ export function App(): JSX.Element {
         sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
       } satisfies ExtensionMessage);
     } else {
+      const groupId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       await chrome.runtime.sendMessage({
-        type: "scrape/retryDate",
+        type: "scrape/start",
         dateKey: selectedDateKey,
+        dateKeys: [selectedDateKey],
+        groupId,
         sourceId: SOURCE_CRUNCHBASE_DISCOVER_ORGS,
       } satisfies ExtensionMessage);
     }
@@ -536,6 +548,28 @@ export function App(): JSX.Element {
       delete next[todayDateKey];
       return next;
     });
+  };
+
+  const hasAnyPersistedLogs = Object.values(logsByDate).some(
+    (lines) => lines.length > 0,
+  );
+
+  const onDownloadLogHistory = () => {
+    if (!hasAnyPersistedLogs) return;
+    const payload = JSON.stringify(logsByDate, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    triggerDownload(blob, `crunchbase-log-history-${todayDateKey}.json`);
+  };
+
+  const onDownloadSampleCsv = async () => {
+    try {
+      const res = await fetch(SAMPLE_CSV_URL);
+      if (!res.ok) throw new Error(String(res.status));
+      const blob = await res.blob();
+      triggerDownload(blob, "cruncbase-sample-csv.csv");
+    } catch {
+      window.open(SAMPLE_CSV_URL, "_blank", "noopener,noreferrer");
+    }
   };
 
   const applyCsvText = useCallback(async (text: string) => {
@@ -747,6 +781,20 @@ export function App(): JSX.Element {
                 <span className="text-[#4c8bf5]">browse</span>
               </p>
             </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={[
+                  "inline-flex items-center gap-1.5 rounded-lg border border-[#2a3140] bg-[#1e2430] px-2.5 py-1.5 text-[11px] font-medium text-[#4c8bf5]",
+                  "cursor-pointer transition-opacity hover:bg-[#252b38]",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4c8bf5]/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1115]",
+                ].join(" ")}
+                onClick={() => void onDownloadSampleCsv()}
+              >
+                <Download className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                Download sample CSV
+              </button>
+            </div>
             {csvHint ? (
               <p
                 className={`mt-2 mb-0 text-[11px] ${
@@ -876,14 +924,29 @@ export function App(): JSX.Element {
             <h3 className="m-0 text-xs font-medium text-[#9aa3b2]">
               Log history (today — {todayDateKey})
             </h3>
-            <button
-              type="button"
-              className={btnBase}
-              disabled={todayLogs.length === 0}
-              onClick={onClearLogHistory}
-            >
-              Clear
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className={[
+                  btnBase,
+                  "inline-flex items-center gap-1.5",
+                ].join(" ")}
+                disabled={!hasAnyPersistedLogs}
+                onClick={onDownloadLogHistory}
+                title="Export all stored log dates as JSON"
+              >
+                <Download className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                Download
+              </button>
+              <button
+                type="button"
+                className={btnBase}
+                disabled={todayLogs.length === 0}
+                onClick={onClearLogHistory}
+              >
+                Clear
+              </button>
+            </div>
           </div>
           {todayLogs.length === 0 ? (
             <p className="m-0 text-[11px] text-[#9aa3b2]">
@@ -937,6 +1000,17 @@ export function App(): JSX.Element {
           {!hasValidSelectedDate
             ? "Choose a date on the Calendar tab or select a row from your CSV list."
             : "A new Discover tab is opened per date; the scraper configures table view and date range automatically."}
+        </p>
+
+        <p className="mb-2 m-0 text-[11px]">
+          <a
+            href={SUPABASE_JSON_FILES_BUCKET_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#4c8bf5] underline-offset-2 hover:underline"
+          >
+            Open json-files bucket in Supabase
+          </a>
         </p>
 
         <JsonFilesGroupedList

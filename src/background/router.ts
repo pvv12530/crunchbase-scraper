@@ -21,6 +21,8 @@ type SupabaseJsonFile = {
   file_date: string;
   file_path: string;
   created_at: string;
+  group_id?: string | null;
+  rows_count?: number | string | null;
   signed_url?: string | null;
 };
 
@@ -167,6 +169,14 @@ export function initMessageRouter(): void {
             case "supabase/uploadJson": {
               const fd = new FormData();
               fd.append("date", message.date);
+              const gid = message.group_id;
+              if (gid != null && String(gid).trim().length > 0) {
+                fd.append("group_id", String(gid).trim());
+              }
+              const rc = message.rows_count;
+              if (rc != null && String(rc).trim().length > 0) {
+                fd.append("rows_count", String(rc).trim());
+              }
               fd.append(
                 "file",
                 new Blob([message.jsonText], { type: "application/json" }),

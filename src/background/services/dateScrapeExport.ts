@@ -136,6 +136,7 @@ async function uploadMergedJsonToSupabase(
     // The filename still includes the scraped dateKey for traceability.
     fd.append("date", localDateKey());
     if (built.meta.groupId) fd.append("group_id", built.meta.groupId);
+    fd.append("rows_count", String(built.totalRows));
     fd.append(
       "file",
       new Blob([built.jsonText], { type: "application/json" }),
