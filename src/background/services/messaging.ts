@@ -26,7 +26,6 @@ export async function handleContentDone(dateKey: string, totalRows: number): Pro
       .sendMessage({ type: 'scrape/complete', dateKey, meta: done } satisfies ExtensionMessage)
       .catch(() => {});
   }
-  await onScrapeFinished(dateKey);
   try {
     await exportMergedJsonFromDateChunks(dateKey, {
       // Requirement: always create + upload merged JSON when a date finishes.
@@ -35,6 +34,8 @@ export async function handleContentDone(dateKey: string, totalRows: number): Pro
       skipUpload: false,
     });
   } finally {
+    // Advance the queue (may include a between-dates cooldown sleep).
+    await onScrapeFinished(dateKey);
     await tryDownloadBatchZipIfComplete();
   }
 }
